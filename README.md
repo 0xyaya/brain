@@ -9,12 +9,6 @@ An OpenClaw plugin that gives agents persistent memory. Experiences and knowledg
 - `claude` CLI with Claude Max (used by consolidate pipeline)
 - `qmd` CLI (for brain recall)
 
-## Setup
-
-```bash
-qmd collection add ~/corpus/brain --name brain --mask 'index.md'
-```
-
 ## Installation
 
 ```bash
@@ -36,6 +30,15 @@ Add to your OpenClaw config:
   }
 }
 ```
+
+Then register the QMD collection for recall search:
+```bash
+qmd collection add ~/corpus/brain --name brain --mask 'index.md'
+```
+
+Restart the OpenClaw gateway. The plugin will initialize the graph DB and begin capturing sessions automatically.
+
+> **For agents:** see `AGENTS.md` for CLI access and usage instructions.
 
 ## CLI Reference
 
