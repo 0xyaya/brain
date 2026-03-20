@@ -1,13 +1,14 @@
 # AGENTS.md — Brain Plugin Agent Instructions
 
-## CLI Access
+## Setup (run once)
 
-`brain` CLI is available at `~/.openclaw/extensions/brain/bin/brain.js`.
-
-Add to PATH for convenience (run once):
 ```bash
+# Add brain to PATH
 ln -s ~/.openclaw/extensions/brain/bin/brain.js ~/bin/brain
 chmod +x ~/bin/brain
+
+# Register QMD collection for brain recall
+qmd collection add ~/corpus/brain --name brain --mask 'index.md'
 ```
 
 ## Usage

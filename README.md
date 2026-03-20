@@ -12,7 +12,7 @@ An OpenClaw plugin that gives agents persistent memory. Experiences and knowledg
 ## Installation
 
 ```bash
-cp -r brain ~/.openclaw/extensions/brain
+git clone <repo> ~/.openclaw/extensions/brain
 cd ~/.openclaw/extensions/brain && npm install
 ```
 
@@ -29,11 +29,6 @@ Add to your OpenClaw config:
     }
   }
 }
-```
-
-Then register the QMD collection for recall search:
-```bash
-qmd collection add ~/corpus/brain --name brain --mask 'index.md'
 ```
 
 Restart the OpenClaw gateway. The plugin will initialize the graph DB and begin capturing sessions automatically.
