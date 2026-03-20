@@ -3,7 +3,6 @@ import os from "os";
 import path from "path";
 import fs from "fs";
 
-const EMBEDDING_DIM = 64;
 const DB_DIR = path.join(os.homedir(), "corpus", "brain");
 const DB_PATH = path.join(DB_DIR, "brain.db");
 
@@ -51,7 +50,6 @@ export async function initSchema() {
       content STRING,
       agent STRING,
       timestamp STRING,
-      embedding FLOAT[${EMBEDDING_DIM}],
       PRIMARY KEY(id)
     )`,
     `CREATE NODE TABLE IF NOT EXISTS Entity (
@@ -83,27 +81,9 @@ export async function initSchema() {
     await conn.query(q);
   }
 
-  // Vector search uses array_cosine_similarity() — no HNSW index needed for now
-  // When HNSW extension becomes available:
-  // CALL CREATE_HNSW_INDEX('knowledge_embedding_idx', 'Knowledge', 'embedding', metric := 'cosine')
-
   return conn;
 }
 
-// TODO: replace with real embedding API (OpenAI text-embedding-3-small, Voyage, etc.)
-// hashEmbedding is a deterministic placeholder — vector search results will be poor until replaced.
-export function hashEmbedding(text) {
-  const vec = new Float32Array(EMBEDDING_DIM);
-  for (let i = 0; i < text.length; i++) {
-    const idx = i % EMBEDDING_DIM;
-    vec[idx] += text.charCodeAt(i) * (i + 1) * 0.001;
-  }
-  // Normalize
-  let norm = 0;
-  for (let i = 0; i < EMBEDDING_DIM; i++) norm += vec[i] * vec[i];
-  norm = Math.sqrt(norm) || 1;
-  for (let i = 0; i < EMBEDDING_DIM; i++) vec[i] /= norm;
-  return Array.from(vec);
-}
+// TODO: add real vector embeddings when embedding API is available (OpenAI, Voyage, etc.)
 
-export { EMBEDDING_DIM, DB_PATH, DB_DIR };
+export { DB_PATH, DB_DIR };

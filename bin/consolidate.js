@@ -3,7 +3,7 @@ import os from "os";
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
-import { initSchema, getDb, closeDb, hashEmbedding } from "../src/db.js";
+import { initSchema, getDb, closeDb } from "../src/db.js";
 import crypto from "crypto";
 
 const BRAIN_DIR = path.join(os.homedir(), "corpus", "brain");
@@ -241,11 +241,10 @@ Rules:
     const ts = node.timestamp || new Date().toISOString();
     try {
       if (node.nodeType === "Knowledge") {
-        const embStr = `[${hashEmbedding(node.content || "").join(",")}]`;
         await conn.query(
           `MERGE (k:Knowledge {id: '${esc(id)}'})
            SET k.kind = '${esc(node.kind || "fact")}', k.content = '${esc(node.content || "")}',
-               k.agent = '${esc(node.agent || "")}', k.timestamp = '${esc(ts)}', k.embedding = ${embStr}`
+               k.agent = '${esc(node.agent || "")}', k.timestamp = '${esc(ts)}'`
         );
       } else {
         await conn.query(
@@ -272,6 +271,8 @@ Rules:
 
   await closeDb();
   log(`Drain done. ${(extracted.nodes || []).length} nodes, ${(extracted.edges || []).length} edges, ${(extracted.entities || []).length} entities.`);
+
+  await exportIndex();
 }
 
 // --- Maintain ---
@@ -331,6 +332,28 @@ function fallbackExtract(items) {
     }
   }
   return { entities, nodes, edges };
+}
+
+// --- Export index.md ---
+async function exportIndex() {
+  try {
+    const [knowledges, experiences] = await withDb(true, async (conn) => [
+      await safeQuery(conn, `MATCH (k:Knowledge) RETURN k.id AS id, k.kind AS kind, k.content AS content, k.agent AS agent, k.timestamp AS timestamp ORDER BY k.timestamp DESC`),
+      await safeQuery(conn, `MATCH (e:Experience) RETURN e.id AS id, e.type AS type, e.summary AS summary, e.outcome AS outcome, e.agent AS agent, e.timestamp AS timestamp ORDER BY e.timestamp DESC`),
+    ]);
+    let md = "";
+    for (const k of knowledges) {
+      md += `## ${k.id}\nkind: ${k.kind || "fact"}\nagent: ${k.agent || ""}\ncontent: ${k.content || ""}\ntimestamp: ${k.timestamp || ""}\n\n`;
+    }
+    for (const e of experiences) {
+      md += `## ${e.id}\ntype: experience\nagent: ${e.agent || ""}\nsummary: ${e.summary || ""}`;
+      if (e.outcome) md += `\noutcome: ${e.outcome}`;
+      md += `\ntimestamp: ${e.timestamp || ""}\n\n`;
+    }
+    const indexPath = path.join(BRAIN_DIR, "index.md");
+    fs.writeFileSync(indexPath, md);
+    log(`exportIndex: wrote ${indexPath} (${knowledges.length} knowledge, ${experiences.length} experience)`);
+  } catch (e) { log(`exportIndex error: ${e.message}`); }
 }
 
 // --- Main ---

@@ -7,6 +7,13 @@ An OpenClaw plugin that gives agents persistent memory. Experiences and knowledg
 - Node.js 20+
 - [@ladybugdb/core](https://github.com/ladybugdb/ladybugdb) (embedded graph database)
 - `claude` CLI with Claude Max (used by consolidate pipeline)
+- `qmd` CLI (for brain recall)
+
+## Setup
+
+```bash
+qmd collection add ~/corpus/brain --name brain --mask 'index.md'
+```
 
 ## Installation
 

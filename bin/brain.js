@@ -127,30 +127,29 @@ switch (cmd) {
       }
       console.log(JSON.stringify(matches.slice(0, 5)));
     } else {
-      // Vector similarity search on Knowledge.embedding via cosine similarity
-      const { getDb, closeDb, hashEmbedding } = await import("../src/db.js");
+      // BM25 search via qmd CLI
       try {
-        const conn = await getDb(true);
-        const emb = hashEmbedding(query);
-        const embStr = `[${emb.join(",")}]`;
-        const result = await conn.query(
-          `MATCH (k:Knowledge)
-           WITH k, array_cosine_similarity(k.embedding, CAST(${embStr} AS FLOAT[64])) AS score
-           WHERE score > 0
-           RETURN k.id AS id, k.kind AS kind, k.content AS content, k.agent AS agent, score
-           ORDER BY score DESC LIMIT 5`
-        );
-        const rows = await result.getAll();
-        const compact = rows.map(r => ({
-          id: r.id,
-          kind: r.kind,
-          content: (r.content || "").slice(0, 200),
-          agent: r.agent,
-        }));
+        const out = execSync(`qmd search ${JSON.stringify(query)} -c brain --json -n 5`, { encoding: 'utf-8' });
+        const results = JSON.parse(out);
+        const compact = results.map(r => {
+          const meta = {};
+          const text = r.snippet || "";
+          if (r.title) meta.id = r.title;
+          const kindMatch = text.match(/^kind: (.+)/m);
+          const typeMatch = text.match(/^type: (.+)/m);
+          if (kindMatch) meta.kind = kindMatch[1];
+          else if (typeMatch) meta.type = typeMatch[1];
+          const contentMatch = text.match(/^content: (.+)/m);
+          const summaryMatch = text.match(/^summary: (.+)/m);
+          if (contentMatch) meta.content = contentMatch[1].slice(0, 200);
+          else if (summaryMatch) meta.summary = summaryMatch[1].slice(0, 200);
+          const agentMatch = text.match(/^agent: (.+)/m);
+          if (agentMatch) meta.agent = agentMatch[1];
+          return meta;
+        }).filter(m => m.id);
         console.log(JSON.stringify(compact));
-        await closeDb();
       } catch (e) {
-        // If no data yet, return empty
+        // If qmd not available or no results
         console.log("[]");
       }
     }
