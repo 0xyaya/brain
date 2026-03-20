@@ -26,7 +26,6 @@ export async function getDb(readOnly = false) {
 export async function closeDb() {
   // Skip explicit close — LadybugDB native cleanup on process exit causes segfault.
   // OS reclaims file handles safely on exit.
-  _conn = null; _db = null;
   _conn = null;
   _db = null;
 }
@@ -91,9 +90,8 @@ export async function initSchema() {
   return conn;
 }
 
-// TODO: Replace with real embeddings (e.g. OpenAI text-embedding-3-small).
-// This hash-based placeholder is deterministic but NOT semantic — it only
-// supports exact/near-exact text matching via cosine similarity.
+// TODO: replace with real embedding API (OpenAI text-embedding-3-small, Voyage, etc.)
+// hashEmbedding is a deterministic placeholder — vector search results will be poor until replaced.
 export function hashEmbedding(text) {
   const vec = new Float32Array(EMBEDDING_DIM);
   for (let i = 0; i < text.length; i++) {

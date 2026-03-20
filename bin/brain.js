@@ -48,12 +48,12 @@ function parseFlags(args) {
   return { flags, rest };
 }
 
-function isBrainifyRunning() {
+function isConsolidateRunning() {
   return fs.existsSync(LOCK_PATH);
 }
 
-function spawnBrainify(...args) {
-  if (isBrainifyRunning()) return;
+function spawnConsolidate(...args) {
+  if (isConsolidateRunning()) return;
   const child = spawn("node", [path.join(BIN_DIR, "consolidate.js"), ...args], {
     detached: true,
     stdio: "ignore",
@@ -91,7 +91,7 @@ switch (cmd) {
     fs.appendFileSync(target, json + "\n");
 
     if (!flags.buffer) {
-      spawnBrainify("--drain");
+      spawnConsolidate("--drain");
     }
 
     console.log("OK");
@@ -190,7 +190,7 @@ switch (cmd) {
       console.error("Buffer file not found:", flags.buffer);
       process.exit(1);
     }
-    spawnBrainify("--input", flags.buffer);
+    spawnConsolidate("--input", flags.buffer);
     console.log("OK");
     break;
   }
@@ -231,7 +231,7 @@ switch (cmd) {
     if (consolidateFlags.length === 0) {
       consolidateFlags.push("--drain", "--focus", "--recent");
     }
-    spawnBrainify(...consolidateFlags);
+    spawnConsolidate(...consolidateFlags);
     console.log("OK — consolidate spawned with: " + consolidateFlags.join(" "));
     break;
   }

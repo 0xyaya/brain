@@ -24,9 +24,7 @@ function log(msg) {
 
 function acquireLock() {
   if (fs.existsSync(LOCK_PATH)) {
-    const stat = fs.statSync(LOCK_PATH);
-    const ageMs = Date.now() - stat.mtimeMs;
-    if (ageMs < 5 * 60 * 1000) {
+    if (Date.now() - fs.statSync(LOCK_PATH).mtimeMs < 5 * 60 * 1000) {
       log("consolidate already running (lock exists). Exiting.");
       process.exit(0);
     }
@@ -39,469 +37,148 @@ function releaseLock() {
   try { fs.unlinkSync(LOCK_PATH); } catch { /* ignore */ }
 }
 
-function uid() {
-  return crypto.randomUUID().slice(0, 12);
-}
+const uid = () => crypto.randomUUID().slice(0, 12);
+const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+const shellEscape = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
 
 // --- Parse CLI flags ---
-const flags = {
-  drain: false,
-  focus: false,
-  recent: false,
-  permanent: false,
-  daily: false,
-  maintain: false,
-  input: null,
-};
-
+const flags = { drain: false, focus: false, recent: false, permanent: false, daily: false, maintain: false, input: null };
 for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === "--drain") flags.drain = true;
-  else if (process.argv[i] === "--focus") flags.focus = true;
-  else if (process.argv[i] === "--recent") flags.recent = true;
-  else if (process.argv[i] === "--permanent") flags.permanent = true;
-  else if (process.argv[i] === "--daily") flags.daily = true;
-  else if (process.argv[i] === "--maintain") flags.maintain = true;
-  else if (process.argv[i] === "--input" && process.argv[i + 1]) {
-    flags.input = process.argv[++i];
-  }
+  const a = process.argv[i];
+  if (a === "--input" && process.argv[i + 1]) flags.input = process.argv[++i];
+  else if (a.startsWith("--") && a.slice(2) in flags) flags[a.slice(2)] = true;
 }
-
-// Default: no flags = --drain --focus --recent
-const anyFlag = flags.drain || flags.focus || flags.recent || flags.permanent || flags.daily || flags.maintain || flags.input;
-if (!anyFlag) {
-  flags.drain = true;
-  flags.focus = true;
-  flags.recent = true;
+if (!Object.values(flags).some(Boolean)) {
+  flags.drain = flags.focus = flags.recent = true;
 }
 
 // --- MEMORY.md section management ---
 function updateMemorySection(section, content) {
   fs.mkdirSync(path.dirname(MEMORY_MD_PATH), { recursive: true });
-
-  let md = "";
-  if (fs.existsSync(MEMORY_MD_PATH)) {
-    md = fs.readFileSync(MEMORY_MD_PATH, "utf-8");
-  }
-
-  const startMarker = `<!-- BRAIN:${section}:START -->`;
-  const endMarker = `<!-- BRAIN:${section}:END -->`;
-  const block = `${startMarker}\n${content}\n${endMarker}`;
-
-  const startIdx = md.indexOf(startMarker);
-  const endIdx = md.indexOf(endMarker);
-
-  if (startIdx !== -1 && endIdx !== -1) {
-    md = md.slice(0, startIdx) + block + md.slice(endIdx + endMarker.length);
-  } else {
-    // Append at bottom
-    md = md.trimEnd() + "\n\n" + block + "\n";
-  }
-
+  let md = fs.existsSync(MEMORY_MD_PATH) ? fs.readFileSync(MEMORY_MD_PATH, "utf-8") : "";
+  const start = `<!-- BRAIN:${section}:START -->`, end = `<!-- BRAIN:${section}:END -->`;
+  const block = `${start}\n${content}\n${end}`;
+  const si = md.indexOf(start), ei = md.indexOf(end);
+  md = (si !== -1 && ei !== -1) ? md.slice(0, si) + block + md.slice(ei + end.length) : md.trimEnd() + "\n\n" + block + "\n";
   fs.writeFileSync(MEMORY_MD_PATH, md);
 }
 
-// --- Focus: open threads ---
+// --- DB query helper ---
+async function withDb(readOnly, fn) {
+  await initSchema();
+  const conn = await getDb(readOnly);
+  try { return await fn(conn); }
+  finally { await closeDb(); }
+}
+
+async function safeQuery(conn, sql) {
+  try { return await (await conn.query(sql)).getAll(); }
+  catch { return []; }
+}
+
+// --- Focus ---
 async function runFocus() {
   try {
-    await initSchema();
-    const conn = await getDb(true);
-
-    let threads = [];
-    try {
-      const r = await conn.query(
-        `MATCH (k:Knowledge {kind: 'thread'}) RETURN k.content AS content, k.timestamp AS ts ORDER BY k.timestamp DESC LIMIT 5`
-      );
-      threads = await r.getAll();
-    } catch { /* empty */ }
-
-    await closeDb();
-
+    const threads = await withDb(true, (conn) =>
+      safeQuery(conn, `MATCH (k:Knowledge {kind: 'thread'}) RETURN k.content AS content, k.timestamp AS ts ORDER BY k.timestamp DESC LIMIT 5`)
+    );
     let content = "# Focus\n";
-    if (threads.length > 0) {
-      for (const t of threads) {
-        content += `- ${(t.content || "").slice(0, 120)}\n`;
-      }
-    } else {
-      content += "_No open threads_\n";
-    }
-
+    content += threads.length > 0
+      ? threads.map(t => `- ${(t.content || "").slice(0, 120)}`).join("\n") + "\n"
+      : "_No open threads_\n";
     updateMemorySection("FOCUS", content);
     log(`Focus: ${threads.length} threads`);
-  } catch (e) {
-    log(`Focus error: ${e.message}`);
-  }
+  } catch (e) { log(`Focus error: ${e.message}`); }
 }
 
-// --- Recent: last 48h experiences + knowledges ---
+// --- Recent ---
 async function runRecent() {
   try {
-    await initSchema();
-    const conn = await getDb(true);
     const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
-
-    let experiences = [];
-    try {
-      const r = await conn.query(
-        `MATCH (e:Experience) WHERE e.timestamp > '${escape(cutoff)}'
-         RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome, e.timestamp AS ts
-         ORDER BY e.timestamp DESC LIMIT 5`
-      );
-      experiences = await r.getAll();
-    } catch { /* empty */ }
-
-    let knowledges = [];
-    try {
-      const r = await conn.query(
-        `MATCH (k:Knowledge) WHERE k.timestamp > '${escape(cutoff)}' AND k.kind IN ['fact','decision']
-         RETURN k.content AS content, k.kind AS kind, k.timestamp AS ts
-         ORDER BY k.timestamp DESC LIMIT 8`
-      );
-      knowledges = await r.getAll();
-    } catch { /* empty */ }
-
-    await closeDb();
-
+    const [experiences, knowledges] = await withDb(true, async (conn) => [
+      await safeQuery(conn, `MATCH (e:Experience) WHERE e.timestamp > '${esc(cutoff)}' RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome ORDER BY e.timestamp DESC LIMIT 5`),
+      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.timestamp > '${esc(cutoff)}' AND k.kind IN ['fact','decision'] RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 8`),
+    ]);
     let content = "# Recent\n";
     for (const e of experiences) {
-      const outcome = e.outcome ? ` [${e.outcome}]` : "";
-      content += `- ${(e.summary || e.type || "experience").slice(0, 100)}${outcome}\n`;
+      content += `- ${(e.summary || e.type || "experience").slice(0, 100)}${e.outcome ? ` [${e.outcome}]` : ""}\n`;
     }
     for (const k of knowledges) {
-      const kind = k.kind ? `(${k.kind}) ` : "";
-      content += `- ${kind}${(k.content || "").slice(0, 100)}\n`;
+      content += `- ${k.kind ? `(${k.kind}) ` : ""}${(k.content || "").slice(0, 100)}\n`;
     }
-    if (experiences.length === 0 && knowledges.length === 0) {
-      content += "_No recent activity_\n";
-    }
-
+    if (!experiences.length && !knowledges.length) content += "_No recent activity_\n";
     updateMemorySection("RECENT", content);
     log(`Recent: ${experiences.length} experiences, ${knowledges.length} knowledges`);
-  } catch (e) {
-    log(`Recent error: ${e.message}`);
-  }
+  } catch (e) { log(`Recent error: ${e.message}`); }
 }
 
-// --- Permanent: LLM-summarized top knowledges ---
+// --- Permanent ---
 async function runPermanent() {
   try {
-    await initSchema();
-    const conn = await getDb(true);
-
-    let knowledges = [];
-    try {
-      const r = await conn.query(
-        `MATCH (k:Knowledge)
-         RETURN k.content AS content, k.kind AS kind, k.timestamp AS ts
-         ORDER BY k.timestamp DESC LIMIT 20`
-      );
-      knowledges = await r.getAll();
-    } catch { /* empty */ }
-
-    await closeDb();
-
-    if (knowledges.length === 0) {
+    const knowledges = await withDb(true, (conn) =>
+      safeQuery(conn, `MATCH (k:Knowledge) RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 20`)
+    );
+    if (!knowledges.length) {
       updateMemorySection("PERMANENT", "# Permanent\n_No knowledge yet_\n");
       log("Permanent: no knowledges to summarize");
       return;
     }
-
-    const knowledgeList = knowledges.map((k, i) =>
-      `${i + 1}. (${k.kind || "fact"}) ${(k.content || "").slice(0, 200)}`
-    ).join("\n");
-
-    const prompt = `You are summarizing an agent's most important knowledge into permanent memory facts. Given these ${knowledges.length} knowledge items, distill them into 5-10 concise permanent facts. Return ONLY a markdown bulleted list, no preamble.
-
-KNOWLEDGE ITEMS:
-${knowledgeList}
-
-Output format:
-- fact one
-- fact two
-...`;
-
+    const knowledgeList = knowledges.map((k, i) => `${i + 1}. (${k.kind || "fact"}) ${(k.content || "").slice(0, 200)}`).join("\n");
+    const prompt = `You are summarizing an agent's most important knowledge into permanent memory facts. Given these ${knowledges.length} knowledge items, distill them into 5-10 concise permanent facts. Return ONLY a markdown bulleted list, no preamble.\n\nKNOWLEDGE ITEMS:\n${knowledgeList}\n\nOutput format:\n- fact one\n- fact two\n...`;
     let summary;
     try {
       summary = execSync(`echo ${shellEscape(prompt)} | claude --print --permission-mode bypassPermissions`, {
-        encoding: "utf-8",
-        timeout: 120_000,
-        maxBuffer: 1024 * 1024,
+        encoding: "utf-8", timeout: 120_000, maxBuffer: 1024 * 1024,
       }).trim();
-    } catch (e) {
-      log(`Permanent LLM error: ${e.message}`);
-      // Fallback: just list top 10 knowledges
-      summary = knowledges.slice(0, 10).map(k =>
-        `- (${k.kind || "fact"}) ${(k.content || "").slice(0, 120)}`
-      ).join("\n");
+    } catch {
+      summary = knowledges.slice(0, 10).map(k => `- (${k.kind || "fact"}) ${(k.content || "").slice(0, 120)}`).join("\n");
     }
-
     updateMemorySection("PERMANENT", `# Permanent\n${summary}\n`);
     log(`Permanent: summarized ${knowledges.length} knowledges`);
-  } catch (e) {
-    log(`Permanent error: ${e.message}`);
-  }
+  } catch (e) { log(`Permanent error: ${e.message}`); }
 }
 
-// --- Daily: write today's log ---
+// --- Daily ---
 async function runDaily() {
   try {
-    await initSchema();
-    const conn = await getDb(true);
-
     const today = new Date();
     const dateStr = today.toISOString().slice(0, 10);
-    const dayStart = new Date(today);
-    dayStart.setHours(0, 0, 0, 0);
+    const dayStart = new Date(today); dayStart.setHours(0, 0, 0, 0);
     const cutoff = dayStart.toISOString();
-
-    let experiences = [];
-    try {
-      const r = await conn.query(
-        `MATCH (e:Experience) WHERE e.timestamp > '${escape(cutoff)}'
-         RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome, e.timestamp AS ts, e.agent AS agent
-         ORDER BY e.timestamp ASC`
-      );
-      experiences = await r.getAll();
-    } catch { /* empty */ }
-
-    let knowledges = [];
-    try {
-      const r = await conn.query(
-        `MATCH (k:Knowledge) WHERE k.timestamp > '${escape(cutoff)}'
-         RETURN k.content AS content, k.kind AS kind, k.timestamp AS ts
-         ORDER BY k.timestamp ASC`
-      );
-      knowledges = await r.getAll();
-    } catch { /* empty */ }
-
-    await closeDb();
-
+    const [experiences, knowledges] = await withDb(true, async (conn) => [
+      await safeQuery(conn, `MATCH (e:Experience) WHERE e.timestamp > '${esc(cutoff)}' RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome, e.timestamp AS ts ORDER BY e.timestamp ASC`),
+      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.timestamp > '${esc(cutoff)}' RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp ASC`),
+    ]);
     let md = `# ${dateStr}\n\n`;
-
-    if (experiences.length > 0) {
+    if (experiences.length) {
       md += "## Experiences\n";
-      for (const e of experiences) {
-        const time = (e.ts || "").slice(11, 16);
-        const outcome = e.outcome ? ` [${e.outcome}]` : "";
-        md += `- ${time} ${(e.summary || e.type || "experience").slice(0, 150)}${outcome}\n`;
-      }
+      for (const e of experiences) md += `- ${(e.ts || "").slice(11, 16)} ${(e.summary || e.type || "experience").slice(0, 150)}${e.outcome ? ` [${e.outcome}]` : ""}\n`;
       md += "\n";
     }
-
-    if (knowledges.length > 0) {
+    if (knowledges.length) {
       md += "## Knowledges\n";
-      for (const k of knowledges) {
-        const kind = k.kind ? `(${k.kind}) ` : "";
-        md += `- ${kind}${(k.content || "").slice(0, 150)}\n`;
-      }
+      for (const k of knowledges) md += `- ${k.kind ? `(${k.kind}) ` : ""}${(k.content || "").slice(0, 150)}\n`;
       md += "\n";
     }
-
-    if (experiences.length === 0 && knowledges.length === 0) {
-      md += "_No activity today_\n";
-    }
-
+    if (!experiences.length && !knowledges.length) md += "_No activity today_\n";
     fs.mkdirSync(DAILY_DIR, { recursive: true });
     const dailyPath = path.join(DAILY_DIR, `${dateStr}.md`);
     fs.writeFileSync(dailyPath, md);
     log(`Daily: wrote ${dailyPath} (${experiences.length} exp, ${knowledges.length} know)`);
-  } catch (e) {
-    log(`Daily error: ${e.message}`);
-  }
+  } catch (e) { log(`Daily error: ${e.message}`); }
 }
 
-// --- Drain: process queue.jsonl (existing memify logic) ---
+// --- Drain ---
 async function runDrain() {
   const filePath = flags.input || QUEUE_PATH;
-  if (!fs.existsSync(filePath)) {
-    log(`No input file: ${filePath}`);
-    return;
-  }
-
+  if (!fs.existsSync(filePath)) { log(`No input file: ${filePath}`); return; }
   const raw = fs.readFileSync(filePath, "utf-8").trim();
-  if (!raw) {
-    log("Empty input file.");
-    return;
-  }
-
-  const items = raw.split("\n").map(line => {
-    try { return JSON.parse(line); } catch { return null; }
-  }).filter(Boolean);
-
-  if (items.length === 0) {
-    log("No valid items.");
-    return;
-  }
-
+  if (!raw) { log("Empty input file."); return; }
+  const items = raw.split("\n").map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  if (!items.length) { log("No valid items."); return; }
   log(`Processing ${items.length} items (${flags.input ? "input" : "drain"})`);
 
-  // Build LLM prompt
-  const prompt = buildPrompt(items);
-
-  // Run LLM
-  let llmResponse;
-  try {
-    llmResponse = execSync(`echo ${shellEscape(prompt)} | claude --print --permission-mode bypassPermissions`, {
-      encoding: "utf-8",
-      timeout: 120_000,
-      maxBuffer: 1024 * 1024,
-    });
-  } catch (e) {
-    log(`LLM call failed: ${e.message}`);
-    llmResponse = null;
-  }
-
-  // Parse LLM response or build fallback
-  let extracted;
-  if (llmResponse) {
-    extracted = parseLLMResponse(llmResponse);
-  }
-  if (!extracted) {
-    extracted = fallbackExtract(items);
-  }
-
-  // Write to DB
-  await initSchema();
-  const conn = await getDb();
-
-  // Upsert entities
-  for (const entity of extracted.entities || []) {
-    const id = `entity:${entity.name.toLowerCase().replace(/\s+/g, "-")}`;
-    try {
-      const stmt = await conn.prepare(
-        `MERGE (e:Entity {id: $id}) SET e.name = $name, e.type = $type, e.metadata = $metadata`
-      );
-      await conn.execute(stmt, {
-        id,
-        name: entity.name,
-        type: entity.type || "concept",
-        metadata: JSON.stringify(entity.metadata || {}),
-      });
-    } catch (e) {
-      log(`Entity upsert error: ${e.message}`);
-    }
-  }
-
-  // Create nodes
-  for (const node of extracted.nodes || []) {
-    const id = node.id || `${node.nodeType || "exp"}:${uid()}`;
-    const ts = node.timestamp || new Date().toISOString();
-    try {
-      if (node.nodeType === "Knowledge") {
-        const emb = hashEmbedding(node.content || "");
-        const embStr = `[${emb.join(",")}]`;
-        await conn.query(
-          `MERGE (k:Knowledge {id: '${escape(id)}'})
-           SET k.kind = '${escape(node.kind || "fact")}',
-               k.content = '${escape(node.content || "")}',
-               k.agent = '${escape(node.agent || "")}',
-               k.timestamp = '${escape(ts)}',
-               k.embedding = ${embStr}`
-        );
-      } else {
-        await conn.query(
-          `MERGE (x:Experience {id: '${escape(id)}'})
-           SET x.type = '${escape(node.type || "task_run")}',
-               x.agent = '${escape(node.agent || "")}',
-               x.timestamp = '${escape(ts)}',
-               x.outcome = '${escape(node.outcome || "")}',
-               x.summary = '${escape(node.summary || "")}',
-               x.metadata = '${escape(JSON.stringify(node.metadata || {}))}'`
-        );
-      }
-    } catch (e) {
-      log(`Node create error: ${e.message}`);
-    }
-  }
-
-  // Create edges
-  for (const edge of extracted.edges || []) {
-    try {
-      const { from, to, type } = edge;
-      const fromTable = inferTable(from);
-      const toTable = inferTable(to);
-      if (fromTable && toTable) {
-        await conn.query(
-          `MATCH (a:${fromTable} {id: '${escape(from)}'}), (b:${toTable} {id: '${escape(to)}'})
-           CREATE (a)-[:${type}]->(b)`
-        );
-      }
-    } catch (e) {
-      // Edge may already exist or nodes missing — skip
-    }
-  }
-
-  // Clear input
-  if (!flags.input) {
-    fs.writeFileSync(QUEUE_PATH, "");
-  } else {
-    fs.unlinkSync(flags.input);
-  }
-
-  await closeDb();
-  log(`Drain done. ${(extracted.nodes || []).length} nodes, ${(extracted.edges || []).length} edges, ${(extracted.entities || []).length} entities.`);
-}
-
-// --- Maintain (existing nightly logic) ---
-async function runMaintain() {
-  await initSchema();
-  const conn = await getDb();
-  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  let pruned = 0;
-  let strengthened = 0;
-
-  try {
-    const result = await conn.query(
-      `MATCH (e:Experience)
-       WHERE e.timestamp < '${escape(cutoff)}'
-       AND NOT EXISTS { MATCH (e)-[:DERIVED]->(:Knowledge) }
-       RETURN e.id AS id`
-    );
-    const rows = await result.getAll();
-    for (const row of rows) {
-      try {
-        await conn.query(`MATCH (e:Experience {id: '${escape(row.id)}'}) DETACH DELETE e`);
-        pruned++;
-      } catch { /* skip */ }
-    }
-  } catch (e) {
-    log(`Prune error: ${e.message}`);
-  }
-
-  for (const relType of ["DERIVED", "ABOUT", "INVOLVES", "RELATES_TO", "FOLLOWS"]) {
-    try {
-      await conn.query(`MATCH ()-[r:${relType}]->() SET r.weight = r.weight + 1`);
-      const countResult = await conn.query(`MATCH ()-[r:${relType}]->() RETURN count(r) AS c`);
-      const countRows = await countResult.getAll();
-      strengthened += countRows[0]?.c || 0;
-    } catch (e) {
-      log(`Strengthen ${relType} error: ${e.message}`);
-    }
-  }
-
-  await closeDb();
-  log(`Maintenance done. Pruned ${pruned} stale experiences, strengthened ${strengthened} edges.`);
-}
-
-// --- Helpers ---
-function inferTable(id) {
-  if (id.startsWith("entity:")) return "Entity";
-  if (id.startsWith("know:") || id.startsWith("knowledge:")) return "Knowledge";
-  if (id.startsWith("exp:") || id.startsWith("experience:")) return "Experience";
-  return null;
-}
-
-// Escape single quotes for Cypher string literals
-function escape(s) {
-  return String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-}
-
-// Escape for safe shell argument passing (wraps in single quotes)
-function shellEscape(s) {
-  return "'" + s.replace(/'/g, "'\\''") + "'";
-}
-
-function buildPrompt(items) {
-  return `You are a knowledge extraction engine. Given raw experience/knowledge items from an agent's session, extract structured data for a knowledge graph.
+  const prompt = `You are a knowledge extraction engine. Given raw experience/knowledge items from an agent's session, extract structured data for a knowledge graph.
 
 INPUT ITEMS:
 ${JSON.stringify(items, null, 2)}
@@ -535,100 +212,139 @@ Rules:
 - Create DERIVED edges from Experience to any Knowledge extracted from it
 - Use the agent field from the input items
 - Generate short unique IDs with prefix (exp: or know: or entity:)`;
+
+  let llmResponse;
+  try {
+    llmResponse = execSync(`echo ${shellEscape(prompt)} | claude --print --permission-mode bypassPermissions`, {
+      encoding: "utf-8", timeout: 120_000, maxBuffer: 1024 * 1024,
+    });
+  } catch (e) {
+    log(`LLM call failed: ${e.message}`);
+  }
+
+  let extracted = llmResponse ? parseLLMResponse(llmResponse) : null;
+  if (!extracted) extracted = fallbackExtract(items);
+
+  await initSchema();
+  const conn = await getDb();
+
+  for (const entity of extracted.entities || []) {
+    const id = `entity:${entity.name.toLowerCase().replace(/\s+/g, "-")}`;
+    try {
+      const stmt = await conn.prepare(`MERGE (e:Entity {id: $id}) SET e.name = $name, e.type = $type, e.metadata = $metadata`);
+      await conn.execute(stmt, { id, name: entity.name, type: entity.type || "concept", metadata: JSON.stringify(entity.metadata || {}) });
+    } catch (e) { log(`Entity upsert error: ${e.message}`); }
+  }
+
+  for (const node of extracted.nodes || []) {
+    const id = node.id || `${node.nodeType || "exp"}:${uid()}`;
+    const ts = node.timestamp || new Date().toISOString();
+    try {
+      if (node.nodeType === "Knowledge") {
+        const embStr = `[${hashEmbedding(node.content || "").join(",")}]`;
+        await conn.query(
+          `MERGE (k:Knowledge {id: '${esc(id)}'})
+           SET k.kind = '${esc(node.kind || "fact")}', k.content = '${esc(node.content || "")}',
+               k.agent = '${esc(node.agent || "")}', k.timestamp = '${esc(ts)}', k.embedding = ${embStr}`
+        );
+      } else {
+        await conn.query(
+          `MERGE (x:Experience {id: '${esc(id)}'})
+           SET x.type = '${esc(node.type || "task_run")}', x.agent = '${esc(node.agent || "")}',
+               x.timestamp = '${esc(ts)}', x.outcome = '${esc(node.outcome || "")}',
+               x.summary = '${esc(node.summary || "")}', x.metadata = '${esc(JSON.stringify(node.metadata || {}))}'`
+        );
+      }
+    } catch (e) { log(`Node create error: ${e.message}`); }
+  }
+
+  for (const edge of extracted.edges || []) {
+    try {
+      const fromT = inferTable(edge.from), toT = inferTable(edge.to);
+      if (fromT && toT) {
+        await conn.query(`MATCH (a:${fromT} {id: '${esc(edge.from)}'}), (b:${toT} {id: '${esc(edge.to)}'}) CREATE (a)-[:${edge.type}]->(b)`);
+      }
+    } catch { /* edge may exist or nodes missing */ }
+  }
+
+  if (!flags.input) fs.writeFileSync(QUEUE_PATH, "");
+  else fs.unlinkSync(flags.input);
+
+  await closeDb();
+  log(`Drain done. ${(extracted.nodes || []).length} nodes, ${(extracted.edges || []).length} edges, ${(extracted.entities || []).length} entities.`);
+}
+
+// --- Maintain ---
+async function runMaintain() {
+  await initSchema();
+  const conn = await getDb();
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  let pruned = 0, strengthened = 0;
+  try {
+    const rows = await (await conn.query(
+      `MATCH (e:Experience) WHERE e.timestamp < '${esc(cutoff)}' AND NOT EXISTS { MATCH (e)-[:DERIVED]->(:Knowledge) } RETURN e.id AS id`
+    )).getAll();
+    for (const row of rows) {
+      try { await conn.query(`MATCH (e:Experience {id: '${esc(row.id)}'}) DETACH DELETE e`); pruned++; } catch { /* skip */ }
+    }
+  } catch (e) { log(`Prune error: ${e.message}`); }
+  for (const rel of ["DERIVED", "ABOUT", "INVOLVES", "RELATES_TO", "FOLLOWS"]) {
+    try {
+      await conn.query(`MATCH ()-[r:${rel}]->() SET r.weight = r.weight + 1`);
+      const rows = await (await conn.query(`MATCH ()-[r:${rel}]->() RETURN count(r) AS c`)).getAll();
+      strengthened += rows[0]?.c || 0;
+    } catch (e) { log(`Strengthen ${rel} error: ${e.message}`); }
+  }
+  await closeDb();
+  log(`Maintenance done. Pruned ${pruned} stale experiences, strengthened ${strengthened} edges.`);
+}
+
+// --- Helpers ---
+function inferTable(id) {
+  if (id.startsWith("entity:")) return "Entity";
+  if (id.startsWith("know:") || id.startsWith("knowledge:")) return "Knowledge";
+  if (id.startsWith("exp:") || id.startsWith("experience:")) return "Experience";
+  return null;
 }
 
 function parseLLMResponse(text) {
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return null;
-  try {
-    const parsed = JSON.parse(jsonMatch[0]);
-    if (parsed.entities || parsed.nodes || parsed.edges) return parsed;
-    return null;
-  } catch {
-    return null;
-  }
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try { const p = JSON.parse(m[0]); return (p.entities || p.nodes || p.edges) ? p : null; }
+  catch { return null; }
 }
 
 function fallbackExtract(items) {
-  const entities = [];
-  const nodes = [];
-  const edges = [];
-  const seenEntities = new Set();
-
+  const entities = [], nodes = [], edges = [], seen = new Set();
   for (const item of items) {
     const id = `${item.type === "knowledge" ? "know" : "exp"}:${uid()}`;
     const ts = item.timestamp || new Date().toISOString();
-
     if (item.type === "knowledge") {
-      nodes.push({
-        nodeType: "Knowledge",
-        id,
-        kind: item.kind || "fact",
-        content: item.content || item.summary || "",
-        agent: item.agent || "",
-        timestamp: ts,
-      });
+      nodes.push({ nodeType: "Knowledge", id, kind: item.kind || "fact", content: item.content || item.summary || "", agent: item.agent || "", timestamp: ts });
     } else {
-      nodes.push({
-        nodeType: "Experience",
-        id,
-        type: item.type || "task_run",
-        agent: item.agent || "",
-        outcome: item.outcome || "",
-        summary: item.summary || "",
-        timestamp: ts,
-        metadata: item.metadata || {},
-      });
+      nodes.push({ nodeType: "Experience", id, type: item.type || "task_run", agent: item.agent || "", outcome: item.outcome || "", summary: item.summary || "", timestamp: ts, metadata: item.metadata || {} });
     }
-
-    if (item.agent && !seenEntities.has(item.agent)) {
-      seenEntities.add(item.agent);
-      const entityId = `entity:${item.agent.toLowerCase()}`;
+    if (item.agent && !seen.has(item.agent)) {
+      seen.add(item.agent);
       entities.push({ name: item.agent, type: "agent" });
-      edges.push({ from: id, to: entityId, type: "INVOLVES" });
+      edges.push({ from: id, to: `entity:${item.agent.toLowerCase()}`, type: "INVOLVES" });
     }
   }
-
   return { entities, nodes, edges };
 }
 
 // --- Main ---
 async function run() {
   acquireLock();
-
   try {
-    if (flags.maintain) {
-      await runMaintain();
-    }
-
-    if (flags.drain || flags.input) {
-      await runDrain();
-    }
-
-    if (flags.focus) {
-      await runFocus();
-    }
-
-    if (flags.recent) {
-      await runRecent();
-    }
-
-    if (flags.permanent) {
-      await runPermanent();
-    }
-
-    if (flags.daily) {
-      await runDaily();
-    }
-
+    if (flags.maintain) await runMaintain();
+    if (flags.drain || flags.input) await runDrain();
+    if (flags.focus) await runFocus();
+    if (flags.recent) await runRecent();
+    if (flags.permanent) await runPermanent();
+    if (flags.daily) await runDaily();
     log("consolidate complete.");
-  } finally {
-    releaseLock();
-  }
+  } finally { releaseLock(); }
 }
 
-run().catch(e => {
-  log(`Fatal: ${e.message}`);
-  releaseLock();
-  process.exit(1);
-});
+run().catch(e => { log(`Fatal: ${e.message}`); releaseLock(); process.exit(1); });

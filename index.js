@@ -1,7 +1,7 @@
 import path from "path";
 import os from "os";
 import fs from "fs";
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 
 const BRAIN_DIR = path.join(os.homedir(), "corpus", "brain");
 const QUEUE_PATH = path.join(BRAIN_DIR, "queue.jsonl");
@@ -59,7 +59,7 @@ export default function register(api) {
         };
         fs.mkdirSync(BRAIN_DIR, { recursive: true });
         fs.appendFileSync(QUEUE_PATH, JSON.stringify(item) + "\n");
-        spawnBrainify("--drain", "--focus", "--recent");
+        spawnConsolidate("--drain", "--focus", "--recent");
       } catch { /* silent */ }
     })();
   });
@@ -73,7 +73,7 @@ export default function register(api) {
           try {
             if (fs.existsSync(QUEUE_PATH)) {
               const content = fs.readFileSync(QUEUE_PATH, "utf-8").trim();
-              if (content) spawnBrainify("--drain", "--focus", "--recent");
+              if (content) spawnConsolidate("--drain", "--focus", "--recent");
             }
           } catch { /* silent */ }
         };
@@ -89,8 +89,8 @@ export default function register(api) {
     start: () => {
       const scheduleNext = () => {
         setTimeout(() => {
-          spawnBrainify("--permanent", "--daily", "--maintain");
-          setInterval(() => spawnBrainify("--permanent", "--daily", "--maintain"), 6 * 60 * 60 * 1000);
+          spawnConsolidate("--permanent", "--daily", "--maintain");
+          setInterval(() => spawnConsolidate("--permanent", "--daily", "--maintain"), 6 * 60 * 60 * 1000);
         }, 6 * 60 * 60 * 1000);
       };
       scheduleNext();
@@ -98,7 +98,7 @@ export default function register(api) {
   });
 }
 
-function spawnBrainify(...args) {
+function spawnConsolidate(...args) {
   if (fs.existsSync(LOCK_PATH)) return;
   const child = spawn("node", [path.join(BIN_DIR, "consolidate.js"), ...args], {
     detached: true,
