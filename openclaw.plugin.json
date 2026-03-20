@@ -1,0 +1,21 @@
+{
+  "id": "brain",
+  "name": "Brain — Agent Memory",
+  "version": "0.2.0",
+  "description": "Persistent agent memory: captures experiences, consolidates knowledge via LLM, recalls context from a LadybugDB graph",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "corpusRoot": {
+        "type": "string",
+        "description": "Path to corpus root directory",
+        "default": "~/corpus"
+      },
+      "agentId": {
+        "type": "string",
+        "description": "Agent identifier for memory scoping"
+      }
+    }
+  }
+}

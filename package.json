@@ -1,0 +1,13 @@
+{
+  "name": "brain-plugin",
+  "version": "0.2.0",
+  "description": "Persistent agent memory plugin for OpenClaw — LadybugDB graph, LLM consolidation, CLI interface",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "brain": "./bin/brain.js"
+  },
+  "dependencies": {
+    "@ladybugdb/core": "^0.15.2"
+  }
+}

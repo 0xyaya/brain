@@ -1,0 +1,7 @@
+node_modules/
+*.log
+graph/
+business_plan.md
+product-ecosystem.md
+STATUS.md
+validate.sh
