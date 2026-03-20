@@ -24,8 +24,9 @@ export async function getDb(readOnly = false) {
 // Long-running processes (plugin services) can skip this; the DB
 // closes automatically on process exit.
 export async function closeDb() {
-  if (_conn && !_conn._isClosed) await _conn.close();
-  if (_db && !_db._isClosed) await _db.close();
+  // Skip explicit close — LadybugDB native cleanup on process exit causes segfault.
+  // OS reclaims file handles safely on exit.
+  _conn = null; _db = null;
   _conn = null;
   _db = null;
 }
