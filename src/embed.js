@@ -23,9 +23,27 @@ async function getPipeline() {
   const { pipeline, env } = await import("@xenova/transformers");
   env.allowLocalModels = true;
   env.useBrowserCache = false;
+
+  // Check if model is already cached
+  const cacheDir = path.join(os.homedir(), ".cache", "huggingface", "hub");
+  const modelCached = fs.existsSync(path.join(cacheDir, "models--Xenova--all-MiniLM-L6-v2"));
+
+  const tty = process.stderr.isTTY;
+  if (!modelCached && tty) {
+    process.stderr.write("brain: downloading embedding model (~25MB, one-time)...\n");
+  } else if (modelCached && tty) {
+    process.stderr.write("brain: loading model...\r");
+  }
+
   _pipeline = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
-    progress_callback: null,
+    progress_callback: (p) => {
+      if (tty && p.status === "downloading" && p.name && !modelCached) {
+        const pct = p.progress ? `${Math.round(p.progress)}%` : "";
+        process.stderr.write(`\r  ↓ ${path.basename(p.name)} ${pct}   `);
+      }
+    },
   });
+  if (tty) process.stderr.write("\r                          \r"); // clear line
   return _pipeline;
 }
 
