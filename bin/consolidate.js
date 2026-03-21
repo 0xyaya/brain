@@ -178,10 +178,66 @@ async function runDrain() {
   if (!items.length) { log("No valid items."); return; }
   log(`Processing ${items.length} items (${flags.input ? "input" : "drain"})`);
 
+  await initSchema();
+  const conn = await getDb();
+
+  // Handle graph_import items before LLM extraction
+  const regularItems = [];
+  for (const item of items) {
+    if (item.type === 'graph_import') {
+      const { entities = [], relationships = [] } = item.data || {};
+
+      // Insert Entity nodes
+      for (const entity of entities) {
+        const id = 'entity:' + entity.name.toLowerCase().replace(/[^a-z0-9]/g, '-');
+        const name = entity.name;
+        const type = entity.label || 'Concept';
+        const metadata = JSON.stringify({ description: entity.description || '', source: item.source || 'brain-provider' });
+        try {
+          const stmt = await conn.prepare('MERGE (e:Entity {id: $id}) SET e.name = $name, e.type = $type, e.metadata = $metadata');
+          await conn.execute(stmt, { id, name, type, metadata });
+        } catch (e) { /* skip */ }
+      }
+
+      // Build entity id map for relationship creation
+      const entityIdMap = {};
+      for (const entity of entities) {
+        entityIdMap[entity.name] = 'entity:' + entity.name.toLowerCase().replace(/[^a-z0-9]/g, '-');
+      }
+
+      // Insert CONNECTS edges
+      for (const rel of relationships) {
+        const fromId = entityIdMap[rel.from];
+        const toId = entityIdMap[rel.to];
+        if (!fromId || !toId) continue;
+        try {
+          await conn.query(
+            `MATCH (a:Entity {id: '${esc(fromId)}'}), (b:Entity {id: '${esc(toId)}'})` +
+            ` CREATE (a)-[:CONNECTS {type: '${esc(rel.type || 'RELATES_TO')}', weight: 1.0}]->(b)`
+          );
+        } catch (e) { /* skip duplicate */ }
+      }
+
+      log(`Graph import: ${entities.length} entities, ${relationships.length} relationships`);
+      continue;
+    }
+    regularItems.push(item);
+  }
+
+  // If only graph imports, skip LLM extraction
+  if (!regularItems.length) {
+    if (!flags.input) fs.writeFileSync(QUEUE_PATH, "");
+    else fs.unlinkSync(flags.input);
+    await closeDb();
+    log("Drain done (graph imports only).");
+    await exportIndex();
+    return;
+  }
+
   const prompt = `You are a knowledge extraction engine. Given raw experience/knowledge items from an agent's session, extract structured data for a knowledge graph.
 
 INPUT ITEMS:
-${JSON.stringify(items, null, 2)}
+${JSON.stringify(regularItems, null, 2)}
 
 Extract and return ONLY valid JSON (no markdown, no explanation) with this structure:
 {
@@ -223,10 +279,7 @@ Rules:
   }
 
   let extracted = llmResponse ? parseLLMResponse(llmResponse) : null;
-  if (!extracted) extracted = fallbackExtract(items);
-
-  await initSchema();
-  const conn = await getDb();
+  if (!extracted) extracted = fallbackExtract(regularItems);
 
   for (const entity of extracted.entities || []) {
     const id = `entity:${entity.name.toLowerCase().replace(/\s+/g, "-")}`;

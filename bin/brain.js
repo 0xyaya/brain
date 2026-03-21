@@ -19,6 +19,7 @@ if (cmd === "--help" || cmd === "-h" || !cmd) {
 
 Usage:
   brain push [--buffer <file>] <json>       Push experience/knowledge to queue
+  brain push --graph <file>                 Import entity graph from JSON file
   brain recall [--buffer <file>] <query>    Search knowledge (vector or text)
   brain explore <entity>                    Graph neighborhood of an entity
   brain get <id>                            Get full node by ID
@@ -41,6 +42,8 @@ function parseFlags(args) {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--buffer" && args[i + 1]) {
       flags.buffer = args[++i];
+    } else if (args[i] === "--graph" && args[i + 1]) {
+      flags.graph = args[++i];
     } else {
       rest.push(args[i]);
     }
@@ -64,6 +67,27 @@ function spawnConsolidate(...args) {
 switch (cmd) {
   case "push": {
     const { flags, rest } = parseFlags(args);
+
+    // Handle --graph flag: import entity/relationship JSON
+    if (flags.graph) {
+      if (!fs.existsSync(flags.graph)) {
+        console.error("Graph file not found:", flags.graph);
+        process.exit(1);
+      }
+      const data = JSON.parse(fs.readFileSync(flags.graph, "utf-8"));
+      const item = { type: 'graph_import', data, timestamp: new Date().toISOString() };
+      const target = flags.buffer || QUEUE_PATH;
+      if (flags.buffer) {
+        fs.mkdirSync(path.dirname(flags.buffer), { recursive: true });
+      }
+      fs.appendFileSync(target, JSON.stringify(item) + "\n");
+      if (!flags.buffer) {
+        spawnConsolidate("--drain");
+      }
+      console.log("OK");
+      break;
+    }
+
     let json = rest.join(" ");
 
     // Read from stdin if no JSON arg
@@ -72,7 +96,7 @@ switch (cmd) {
     }
 
     if (!json) {
-      console.error("Usage: brain push [--buffer <file>] <json>");
+      console.error("Usage: brain push [--buffer <file>] [--graph <file>] <json>");
       process.exit(1);
     }
 

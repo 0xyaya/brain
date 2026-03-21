@@ -68,10 +68,11 @@ export async function initSchema() {
     `CREATE REL TABLE IF NOT EXISTS INVOLVES (FROM Experience TO Entity, weight INT64 DEFAULT 1)`,
     `CREATE REL TABLE IF NOT EXISTS RELATES_TO (FROM Knowledge TO Knowledge, weight INT64 DEFAULT 1)`,
     `CREATE REL TABLE IF NOT EXISTS FOLLOWS (FROM Experience TO Experience, weight INT64 DEFAULT 1)`,
+    `CREATE REL TABLE IF NOT EXISTS CONNECTS (FROM Entity TO Entity, type STRING DEFAULT 'RELATES_TO', weight FLOAT DEFAULT 1.0)`,
   ];
 
   // Migrate existing edge tables: add weight column if missing
-  for (const rel of ["DERIVED", "ABOUT", "INVOLVES", "RELATES_TO", "FOLLOWS"]) {
+  for (const rel of ["DERIVED", "ABOUT", "INVOLVES", "RELATES_TO", "FOLLOWS", "CONNECTS"]) {
     try {
       await conn.query(`ALTER TABLE ${rel} ADD weight INT64 DEFAULT 1`);
     } catch { /* column already exists — ignore */ }
