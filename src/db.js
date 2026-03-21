@@ -3,7 +3,9 @@ import os from "os";
 import path from "path";
 import fs from "fs";
 
-const DB_DIR = path.join(os.homedir(), "corpus", "brain");
+const DB_DIR = process.env.BRAIN_DIR
+  ? path.resolve(process.env.BRAIN_DIR)
+  : path.join(os.homedir(), "corpus", "brain");
 const DB_PATH = path.join(DB_DIR, "brain.db");
 
 let _db = null;

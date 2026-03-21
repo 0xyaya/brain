@@ -7,13 +7,25 @@ import { initSchema, getDb, closeDb } from "../src/db.js";
 import { embed, saveEmbedding } from "../src/embed.js";
 import crypto from "crypto";
 
-const BRAIN_DIR = path.join(os.homedir(), "corpus", "brain");
+const DEFAULT_BRAIN_DIR = path.join(os.homedir(), "corpus", "brain");
+const BRAIN_DIR = process.env.BRAIN_DIR
+  ? path.resolve(process.env.BRAIN_DIR)
+  : DEFAULT_BRAIN_DIR;
+
+// Load config from brain dir
+function loadConfig() {
+  try { return JSON.parse(fs.readFileSync(path.join(BRAIN_DIR, "config.json"), "utf-8")); }
+  catch { return {}; }
+}
+const _cfg = loadConfig();
+
 const QUEUE_PATH = path.join(BRAIN_DIR, "queue.jsonl");
 const LOCK_PATH = path.join(BRAIN_DIR, "consolidate.lock");
 const LOG_PATH = path.join(BRAIN_DIR, "consolidate.log");
 
-const AGENT_ID = process.env.BRAIN_AGENT_ID || "neo";
-const USER_DIR = path.join(os.homedir(), "corpus", "users", AGENT_ID);
+const AGENT_ID = process.env.BRAIN_AGENT_ID || _cfg.agentId || "neo";
+const CORPUS_ROOT = (process.env.BRAIN_CORPUS_ROOT || _cfg.corpusRoot || path.join(os.homedir(), "corpus")).replace("~", os.homedir());
+const USER_DIR = path.join(CORPUS_ROOT, "users", AGENT_ID);
 const MEMORY_MD_PATH = path.join(USER_DIR, "MEMORY.md");
 const DAILY_DIR = path.join(USER_DIR, "memory");
 

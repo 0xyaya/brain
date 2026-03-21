@@ -1,22 +1,41 @@
 # Brain — Agent Memory Plugin
 
-An OpenClaw plugin that gives agents persistent memory. Experiences and knowledge are captured into a LadybugDB graph database, consolidated by an LLM pipeline, and surfaced back to agents via a minimal CLI. No external infrastructure required — just an embedded DB, flat files, and `claude` CLI.
+Persistent memory for AI agents. Push experiences and knowledge into a LadybugDB graph, consolidate with an LLM, recall by semantic similarity — no external infrastructure required.
 
 ## Requirements
 
 - Node.js 20+
-- [@ladybugdb/core](https://github.com/ladybugdb/ladybugdb) (embedded graph database)
-- `claude` CLI with Claude Max (used by consolidate pipeline)
-- `qmd` CLI (for brain recall)
+- `claude` CLI ([install](https://docs.anthropic.com/en/docs/claude-code)) — used by the consolidation pipeline to extract entities and relationships from raw session data
+- Claude API access (Anthropic account with API key configured in `claude` CLI)
 
-## Installation
+## Quick Start
+
+```bash
+# 1. Clone and install
+git clone <repo> brain
+cd brain && npm install
+
+# 2. Link the CLI
+npm link   # or: ln -s $(pwd)/bin/brain.js ~/.local/bin/brain
+
+# 3. Initialize for your agent
+brain init --agent myagent
+
+# 4. Build the vector index (downloads ~25MB model once)
+brain consolidate --embed
+
+# 5. Test recall
+brain recall --agent myagent "what have I been working on"
+```
+
+## Installation (OpenClaw plugin)
 
 ```bash
 git clone <repo> ~/.openclaw/extensions/brain
 cd ~/.openclaw/extensions/brain && npm install
 ```
 
-Add to your OpenClaw config:
+Add to your `openclaw.json`:
 
 ```json
 {
@@ -31,94 +50,132 @@ Add to your OpenClaw config:
 }
 ```
 
-Restart the OpenClaw gateway. The plugin will initialize the graph DB and begin capturing sessions automatically.
+Restart the OpenClaw gateway.
 
-> **For agents:** see `AGENTS.md` for CLI access and usage instructions.
+## Configuration
+
+Brain reads `~/corpus/brain/config.json` (or `$BRAIN_DIR/config.json`):
+
+```json
+{
+  "agentId": "myagent",
+  "corpusRoot": "~/my-data",
+  "brainDir": "~/my-data/brain"
+}
+```
+
+All paths can also be set via environment variables:
+
+| Variable           | Default                  | Description                    |
+|--------------------|--------------------------|--------------------------------|
+| `BRAIN_DIR`        | `~/corpus/brain`         | Brain DB + queue + config dir  |
+| `BRAIN_AGENT_ID`   | value from config.json   | Agent identifier               |
+| `BRAIN_CORPUS_ROOT`| `~/corpus`               | Root for agent memory dirs     |
+
+`brain init --agent <id>` creates the config and directory structure automatically.
 
 ## CLI Reference
 
 ```bash
-brain push [--buffer <file>] <json>       # Push experience/knowledge to queue
-brain recall [--buffer <file>] <query>    # Search knowledge (vector or text)
-brain explore <entity>                    # Graph neighborhood of an entity
-brain get <id>                            # Get full node by ID
-brain flush --buffer <file>               # Flush buffer file via consolidate
-brain consolidate [--flags]               # Run consolidate pipeline
-brain --help                              # Print usage
+brain init [--agent <id>] [--corpus <path>]   # Initialize brain for this machine
+brain push [--agent <id>] <json>              # Push experience/knowledge to queue
+brain push --graph <file>                     # Import entity graph from JSON
+brain recall [--agent <id>] [--days N] <query> # Semantic search over memory
+brain explore <entity>                        # Graph neighborhood of an entity
+brain get <id>                                # Get full node by ID
+brain consolidate [--agent <id>] [--flags]    # Run consolidation pipeline
+brain --help                                  # Print usage
 ```
 
-### Push modes
-
-**Interactive** (default): appends to `queue.jsonl`, spawns consolidate.
+### Push formats
 
 ```bash
-brain push '{"type": "experience", "agent": "neo", "summary": "deployed v2", "outcome": "success"}'
-brain push '{"type": "knowledge", "kind": "fact", "content": "Always use --flag X"}'
+# Experience (what happened)
+brain push --agent myagent '{"type":"experience","summary":"deployed v2 to prod","outcome":"success"}'
+
+# Knowledge (what was learned)
+brain push --agent myagent '{"type":"knowledge","kind":"fact","content":"always use --flag X"}'
+brain push --agent myagent '{"type":"knowledge","kind":"decision","content":"use postgres not sqlite"}'
+
+# Entity graph (bulk import)
+brain push --graph personas/karpathy.brain.json
 ```
 
-**Buffered** (for workflows): writes to an isolated file, flushed at end.
+### Recall
 
 ```bash
-brain push --buffer /tmp/run.jsonl '{"type": "experience", ...}'
-brain recall --buffer /tmp/run.jsonl "deploy error"
-brain flush --buffer /tmp/run.jsonl
+brain recall --agent myagent "neural networks and training"
+# Returns semantically similar nodes — works even with zero keyword overlap
+# Also searches last 3 days of daily memory logs (keyword fallback)
+brain recall --agent myagent --days 7 "deployment issues"  # extend daily log window
 ```
 
 ### Consolidate flags
 
-| Flag          | Description                                          |
-|---------------|------------------------------------------------------|
-| `--drain`     | Process queue.jsonl — LLM extracts entities & edges  |
-| `--focus`     | Update MEMORY.md focus section (open threads)        |
-| `--recent`    | Update MEMORY.md recent section (last 48h)           |
-| `--permanent` | LLM-summarize top knowledge into permanent facts     |
-| `--daily`     | Write daily log to `memory/YYYY-MM-DD.md`            |
-| `--maintain`  | Prune stale experiences, strengthen edge weights      |
+| Flag          | Description                                              | Needs Claude |
+|---------------|----------------------------------------------------------|-------------|
+| `--drain`     | Process queue — LLM extracts entities & edges to graph   | ✓           |
+| `--focus`     | Update MEMORY.md focus section (open threads)            | ✓           |
+| `--recent`    | Update MEMORY.md recent section (last 48h)               | ✓           |
+| `--permanent` | LLM-summarize top knowledge into permanent facts         | ✓           |
+| `--daily`     | Write daily log to `memory/YYYY-MM-DD.md`                | ✓           |
+| `--maintain`  | Prune stale experiences, strengthen edge weights         | ✗           |
+| `--embed`     | Backfill vector embeddings for all existing nodes        | ✗           |
 
-No flags defaults to `--drain --focus --recent`.
+No flags → defaults to `--drain --focus --recent`.
+
+### Recommended cron schedule
+
+```
+every 30m → brain consolidate --drain --focus --recent
+every 6h  → brain consolidate --drain --focus --recent --permanent --daily
+```
 
 ## Architecture
 
 ### Graph schema
 
-Three node types in LadybugDB:
-
-- **Experience** — what happened (conversations, task runs, DAG steps)
+- **Experience** — what happened (sessions, tasks, outcomes)
 - **Knowledge** — what was learned (facts, decisions, open threads)
-- **Entity** — who or what (agents, projects, tools, concepts)
+- **Entity** — who/what (agents, projects, tools, concepts)
 
-Five edge types: `DERIVED`, `ABOUT`, `INVOLVES`, `RELATES_TO`, `FOLLOWS` — all with a `weight` column incremented by nightly maintenance.
+Edges: `DERIVED`, `ABOUT`, `INVOLVES`, `RELATES_TO`, `FOLLOWS`
 
-### Consolidate pipeline
+### Recall pipeline
 
-`bin/consolidate.js` is the single DB writer. It runs as a detached subprocess (never blocks the caller) with a lockfile to prevent concurrent runs.
+1. Embed query via `all-MiniLM-L6-v2` (local, ~25MB, no API key)
+2. Cosine similarity over `embeddings.json` (all 950+ nodes)
+3. Fetch top-N node details from LadybugDB
+4. Keyword fallback over recent daily logs (`memory/YYYY-MM-DD.md`)
 
-1. **Drain** — reads queue items, sends to LLM for entity/relationship extraction, writes nodes + edges to LadybugDB
-2. **Focus/Recent** — queries the graph, writes summary sections into `MEMORY.md`
-3. **Permanent** — LLM-summarizes top knowledge into permanent facts in `MEMORY.md`
-4. **Daily** — writes a date-stamped log of the day's experiences and knowledge
-5. **Maintain** — prunes experiences older than 30 days with no derived knowledge, strengthens surviving edges
+### Vector embeddings
 
-### MEMORY.md sections
+Embeddings are stored in `$BRAIN_DIR/embeddings.json` (outside LadybugDB to avoid type conflicts). New nodes are embedded automatically at consolidate time. Backfill existing nodes with `brain consolidate --embed`.
 
-The consolidate pipeline maintains three auto-updating sections in `MEMORY.md` (delimited by `<!-- BRAIN:*:START/END -->` markers):
+### MEMORY.md
 
+Auto-maintained by consolidate pipeline via `<!-- BRAIN:*:START/END -->` markers:
 - **Focus** — current open threads
-- **Recent** — last 48h of experiences and knowledge
-- **Permanent** — LLM-distilled permanent facts
+- **Recent** — last 48h digest
+- **Permanent** — LLM-distilled long-term facts
 
-### Plugin hooks
+## Known Issues
 
-- `after_compaction` — pushes a compaction experience to the queue, runs drain + focus + recent
-- `brain-drain` service — every 5 minutes, drains queue if non-empty
-- `brain-nightly` service — every 6 hours, runs permanent + daily + maintain
+**Stale lock file** — LadybugDB can crash during `--maintain` (ABOUT edge assertion failure), leaving `consolidate.lock` behind. Fix:
+```bash
+rm ~/corpus/brain/consolidate.lock
+```
 
-## Config
+**`--maintain` ABOUT crash** — LadybugDB bug in edge strengthening for ABOUT relationships. `--maintain` skips ABOUT edges as a workaround. All other edge types work fine.
 
-| Key           | Type   | Default    | Description                |
-|---------------|--------|------------|----------------------------|
-| `agentId`     | string | `"neo"`    | Agent identifier           |
-| `corpusRoot`  | string | `~/corpus` | Path to corpus root        |
+## Example personas
+
+See `personas/` directory for ready-to-import `.brain.json` files:
+
+```bash
+brain push --graph personas/karpathy.brain.json   # Andrej Karpathy knowledge graph
+brain push --graph personas/hormozi.brain.json    # Alex Hormozi frameworks
+```
 
 ## License
 

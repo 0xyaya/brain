@@ -14,7 +14,12 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-const EMBEDDINGS_PATH = path.join(os.homedir(), "corpus", "brain", "embeddings.json");
+const EMBEDDINGS_PATH = path.join(
+  process.env.BRAIN_DIR
+    ? path.resolve(process.env.BRAIN_DIR)
+    : path.join(os.homedir(), "corpus", "brain"),
+  "embeddings.json"
+);
 
 let _pipeline = null;
 

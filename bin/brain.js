@@ -4,7 +4,27 @@ import fs from "fs";
 import path from "path";
 import { spawn, execSync } from "child_process";
 
-const BRAIN_DIR = path.join(os.homedir(), "corpus", "brain");
+// --- Config resolution (supports custom brainDir + corpusRoot) ---
+const DEFAULT_BRAIN_DIR = path.join(os.homedir(), "corpus", "brain");
+
+function loadConfig(brainDir = DEFAULT_BRAIN_DIR) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(brainDir, "config.json"), "utf-8"));
+  } catch { return {}; }
+}
+
+// Allow BRAIN_DIR override via env or default
+const BRAIN_DIR = process.env.BRAIN_DIR
+  ? path.resolve(process.env.BRAIN_DIR)
+  : (() => {
+      // Check if a config exists at default location pointing elsewhere
+      try {
+        const cfg = JSON.parse(fs.readFileSync(path.join(DEFAULT_BRAIN_DIR, "config.json"), "utf-8"));
+        if (cfg.brainDir) return path.resolve(cfg.brainDir.replace("~", os.homedir()));
+      } catch { /* use default */ }
+      return DEFAULT_BRAIN_DIR;
+    })();
+
 const QUEUE_PATH = path.join(BRAIN_DIR, "queue.jsonl");
 const LOCK_PATH = path.join(BRAIN_DIR, "consolidate.lock");
 const BIN_DIR = path.dirname(new URL(import.meta.url).pathname);
@@ -14,21 +34,27 @@ fs.mkdirSync(BRAIN_DIR, { recursive: true });
 const cmd = process.argv[2];
 const args = process.argv.slice(3);
 
-// Resolve agent ID: --agent flag > BRAIN_AGENT_ID env > config file > "neo"
+// Resolve agent ID: --agent flag > BRAIN_AGENT_ID env > config file > prompt user
 function resolveAgentId(flags = {}) {
   if (flags.agent) return flags.agent;
   if (process.env.BRAIN_AGENT_ID) return process.env.BRAIN_AGENT_ID;
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(BRAIN_DIR, "config.json"), "utf-8"));
-    if (cfg.agentId) return cfg.agentId;
-  } catch { /* no config file */ }
-  return "neo";
+  const cfg = loadConfig(BRAIN_DIR);
+  if (cfg.agentId) return cfg.agentId;
+  return null; // will be caught where needed
+}
+
+// Resolve corpus root for daily memory logs
+function resolveCorpusRoot(flags = {}) {
+  const cfg = loadConfig(BRAIN_DIR);
+  const root = process.env.BRAIN_CORPUS_ROOT || cfg.corpusRoot || path.join(os.homedir(), "corpus");
+  return root.replace("~", os.homedir());
 }
 
 if (cmd === "--help" || cmd === "-h" || !cmd) {
   console.log(`brain — agent memory CLI
 
 Usage:
+  brain init [--agent <id>] [--corpus <path>]  Set up brain for this machine
   brain push [--buffer <file>] [--agent <id>] <json>       Push experience/knowledge to queue
   brain push --graph <file> [--agent <id>]                  Import entity graph from JSON file
   brain recall [--buffer <file>] [--agent <id>] [--days N] <query>  Search knowledge + daily logs
@@ -61,6 +87,8 @@ function parseFlags(args) {
       flags.days = args[++i];
     } else if (args[i] === "--agent" && args[i + 1]) {
       flags.agent = args[++i];
+    } else if (args[i] === "--corpus" && args[i + 1]) {
+      flags.corpus = args[++i];
     } else {
       rest.push(args[i]);
     }
@@ -223,9 +251,11 @@ switch (cmd) {
       // 2. Keyword search over recent daily memory logs (last N days)
       const days = flags.days ? parseInt(flags.days) : 3;
       const agentId = resolveAgentId(flags);
-      const dailyDir = path.join(os.homedir(), "corpus", "users", agentId, "memory");
+      const corpusRoot = resolveCorpusRoot(flags);
+      const dailyDir = agentId ? path.join(corpusRoot, "users", agentId, "memory") : null;
       const queryLower = query.toLowerCase();
       try {
+        if (!dailyDir) throw new Error("no dailyDir");
         const now = new Date();
         for (let i = 0; i < days; i++) {
           const d = new Date(now);
@@ -327,6 +357,64 @@ switch (cmd) {
     }
     spawnConsolidate(resolveAgentId(cFlags), ...consolidateFlags);
     console.log("OK — consolidate spawned with: " + consolidateFlags.join(" "));
+    break;
+  }
+
+  case "init": {
+    const { flags: initFlags } = parseFlags(args);
+    const agentId = initFlags.agent || process.env.BRAIN_AGENT_ID;
+    const corpusRoot = initFlags.corpus
+      ? path.resolve(initFlags.corpus.replace("~", os.homedir()))
+      : path.join(os.homedir(), "corpus");
+
+    if (!agentId) {
+      console.error("Error: agent ID required. Use --agent <id> (e.g. brain init --agent myagent)");
+      process.exit(1);
+    }
+
+    // Create directory structure
+    const brainDir = BRAIN_DIR;
+    const memoryDir = path.join(corpusRoot, "users", agentId, "memory");
+    const userDir = path.join(corpusRoot, "users", agentId);
+    fs.mkdirSync(brainDir, { recursive: true });
+    fs.mkdirSync(memoryDir, { recursive: true });
+
+    // Write config.json
+    const configPath = path.join(brainDir, "config.json");
+    const existingConfig = loadConfig(brainDir);
+    const config = { ...existingConfig, agentId, corpusRoot };
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+    // Create MEMORY.md if missing
+    const memoryMdPath = path.join(userDir, "MEMORY.md");
+    if (!fs.existsSync(memoryMdPath)) {
+      fs.writeFileSync(memoryMdPath, `# MEMORY.md — Long-term Memory
+
+<!-- BRAIN:FOCUS:START -->
+# Focus
+<!-- BRAIN:FOCUS:END -->
+
+<!-- BRAIN:RECENT:START -->
+# Recent
+<!-- BRAIN:RECENT:END -->
+
+<!-- BRAIN:PERMANENT:START -->
+# Permanent
+<!-- BRAIN:PERMANENT:END -->
+`);
+      console.log(`  created ${memoryMdPath}`);
+    }
+
+    console.log(`✓ Brain initialized`);
+    console.log(`  agent:      ${agentId}`);
+    console.log(`  brain DB:   ${brainDir}`);
+    console.log(`  memory:     ${memoryDir}`);
+    console.log(`  config:     ${configPath}`);
+    console.log(``);
+    console.log(`Next steps:`);
+    console.log(`  1. brain consolidate --drain --focus --recent   # first consolidation`);
+    console.log(`  2. brain consolidate --embed                    # build vector index (~25MB model download)`);
+    console.log(`  3. brain recall --agent ${agentId} "test query"  # verify search works`);
     break;
   }
 
