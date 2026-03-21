@@ -46,6 +46,8 @@ function parseFlags(args) {
       flags.graph = args[++i];
     } else if (args[i] === "--source" && args[i + 1]) {
       flags.source = args[++i];
+    } else if (args[i] === "--days" && args[i + 1]) {
+      flags.days = args[++i];
     } else {
       rest.push(args[i]);
     }
@@ -153,12 +155,14 @@ switch (cmd) {
       }
       console.log(JSON.stringify(matches.slice(0, 5)));
     } else {
-      // BM25 search via qmd CLI
+      const results = [];
+
+      // 1. BM25 search over index.md (graph: Knowledge + Experience + Entity) via qmd
       try {
         const out = execSync(`qmd search ${JSON.stringify(query)} -c brain --json -n 5`, { encoding: 'utf-8' });
-        const results = JSON.parse(out);
-        const compact = results.map(r => {
-          const meta = {};
+        const qmdResults = JSON.parse(out);
+        for (const r of qmdResults) {
+          const meta = { source: "graph" };
           const text = r.snippet || "";
           if (r.title) meta.id = r.title;
           const kindMatch = text.match(/^kind: (.+)/m);
@@ -167,17 +171,52 @@ switch (cmd) {
           else if (typeMatch) meta.type = typeMatch[1];
           const contentMatch = text.match(/^content: (.+)/m);
           const summaryMatch = text.match(/^summary: (.+)/m);
+          const descMatch = text.match(/^description: (.+)/m);
           if (contentMatch) meta.content = contentMatch[1].slice(0, 200);
-          else if (summaryMatch) meta.summary = summaryMatch[1].slice(0, 200);
+          else if (summaryMatch) meta.content = summaryMatch[1].slice(0, 200);
+          else if (descMatch) meta.content = descMatch[1].slice(0, 200);
           const agentMatch = text.match(/^agent: (.+)/m);
           if (agentMatch) meta.agent = agentMatch[1];
-          return meta;
-        }).filter(m => m.id);
-        console.log(JSON.stringify(compact));
-      } catch (e) {
-        // If qmd not available or no results
-        console.log("[]");
-      }
+          if (meta.id) results.push(meta);
+        }
+      } catch { /* qmd not available or no results */ }
+
+      // 2. Search recent daily memory logs (last N days)
+      const days = flags.days ? parseInt(flags.days) : 3;
+      const agentId = process.env.BRAIN_AGENT_ID || (() => {
+        try {
+          const cfg = JSON.parse(fs.readFileSync(path.join(BRAIN_DIR, "config.json"), "utf-8"));
+          return cfg.agentId || "neo";
+        } catch { return "neo"; }
+      })();
+      const dailyDir = path.join(os.homedir(), "corpus", "users", agentId, "memory");
+      const queryLower = query.toLowerCase();
+      try {
+        const now = new Date();
+        for (let i = 0; i < days; i++) {
+          const d = new Date(now);
+          d.setDate(d.getDate() - i);
+          const dateStr = d.toISOString().slice(0, 10); // YYYY-MM-DD
+          const logPath = path.join(dailyDir, `${dateStr}.md`);
+          if (!fs.existsSync(logPath)) continue;
+          const content = fs.readFileSync(logPath, "utf-8");
+          if (!content.toLowerCase().includes(queryLower)) continue;
+          // Extract matching paragraphs (split on double newline)
+          const paras = content.split(/\n{2,}/);
+          for (const para of paras) {
+            if (para.toLowerCase().includes(queryLower)) {
+              results.push({
+                source: "daily",
+                date: dateStr,
+                content: para.trim().slice(0, 300),
+              });
+              if (results.filter(r => r.source === "daily").length >= 3) break;
+            }
+          }
+        }
+      } catch { /* no daily dir or unreadable */ }
+
+      console.log(JSON.stringify(results.slice(0, 10)));
     }
     break;
   }

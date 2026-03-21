@@ -398,9 +398,10 @@ function fallbackExtract(items) {
 // --- Export index.md ---
 async function exportIndex() {
   try {
-    const [knowledges, experiences] = await withDb(true, async (conn) => [
+    const [knowledges, experiences, entities] = await withDb(true, async (conn) => [
       await safeQuery(conn, `MATCH (k:Knowledge) RETURN k.id AS id, k.kind AS kind, k.content AS content, k.agent AS agent, k.timestamp AS timestamp ORDER BY k.timestamp DESC`),
       await safeQuery(conn, `MATCH (e:Experience) RETURN e.id AS id, e.type AS type, e.summary AS summary, e.outcome AS outcome, e.agent AS agent, e.timestamp AS timestamp ORDER BY e.timestamp DESC`),
+      await safeQuery(conn, `MATCH (e:Entity) RETURN e.id AS id, e.name AS name, e.kind AS kind, e.description AS description, e.source AS source ORDER BY e.id ASC`),
     ]);
     let md = "";
     for (const k of knowledges) {
@@ -411,9 +412,15 @@ async function exportIndex() {
       if (e.outcome) md += `\noutcome: ${e.outcome}`;
       md += `\ntimestamp: ${e.timestamp || ""}\n\n`;
     }
+    for (const e of entities) {
+      md += `## ${e.id}\ntype: entity\nname: ${e.name || ""}\nkind: ${e.kind || ""}`;
+      if (e.description) md += `\ndescription: ${e.description}`;
+      if (e.source) md += `\nsource: ${e.source}`;
+      md += `\n\n`;
+    }
     const indexPath = path.join(BRAIN_DIR, "index.md");
     fs.writeFileSync(indexPath, md);
-    log(`exportIndex: wrote ${indexPath} (${knowledges.length} knowledge, ${experiences.length} experience)`);
+    log(`exportIndex: wrote ${indexPath} (${knowledges.length} knowledge, ${experiences.length} experience, ${entities.length} entities)`);
   } catch (e) { log(`exportIndex error: ${e.message}`); }
 }
 
@@ -423,6 +430,10 @@ async function run() {
   try {
     if (flags.maintain) await runMaintain();
     if (flags.drain || flags.input) await runDrain();
+    else if (flags.maintain || flags.focus || flags.recent || flags.permanent || flags.daily) {
+      // exportIndex is called inside runDrain; call it explicitly when drain didn't run
+      await exportIndex();
+    }
     if (flags.focus) await runFocus();
     if (flags.recent) await runRecent();
     if (flags.permanent) await runPermanent();
