@@ -223,11 +223,16 @@ switch (cmd) {
               try {
                 const table = id.startsWith("entity:") ? "Entity"
                   : id.startsWith("know:") ? "Knowledge" : "Experience";
-                const textField = table === "Knowledge" ? "content"
-                  : table === "Experience" ? "summary" : "name";
-                const rows = await (await conn.query(
-                  `MATCH (n:${table} {id: '${id}'}) RETURN n.${textField} AS text, n.kind AS kind, n.agent AS agent`
-                )).getAll();
+                // Only query columns that exist per node type
+                let q;
+                if (table === "Knowledge") {
+                  q = `MATCH (n:Knowledge {id: '${id}'}) RETURN n.content AS text, n.kind AS kind, n.agent AS agent`;
+                } else if (table === "Experience") {
+                  q = `MATCH (n:Experience {id: '${id}'}) RETURN n.summary AS text, n.type AS kind, n.agent AS agent`;
+                } else {
+                  q = `MATCH (n:Entity {id: '${id}'}) RETURN n.name AS text, n.kind AS kind`;
+                }
+                const rows = await (await conn.query(q)).getAll();
                 if (rows[0]) {
                   results.push({
                     source: "graph",
