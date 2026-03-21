@@ -44,6 +44,8 @@ function parseFlags(args) {
       flags.buffer = args[++i];
     } else if (args[i] === "--graph" && args[i + 1]) {
       flags.graph = args[++i];
+    } else if (args[i] === "--source" && args[i + 1]) {
+      flags.source = args[++i];
     } else {
       rest.push(args[i]);
     }
@@ -75,7 +77,7 @@ switch (cmd) {
         process.exit(1);
       }
       const data = JSON.parse(fs.readFileSync(flags.graph, "utf-8"));
-      const item = { type: 'graph_import', data, timestamp: new Date().toISOString() };
+      const item = { type: 'graph_import', data, timestamp: new Date().toISOString(), ...(flags.source && { source: flags.source }) };
       const target = flags.buffer || QUEUE_PATH;
       if (flags.buffer) {
         fs.mkdirSync(path.dirname(flags.buffer), { recursive: true });

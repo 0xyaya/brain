@@ -192,10 +192,11 @@ async function runDrain() {
         const id = 'entity:' + entity.name.toLowerCase().replace(/[^a-z0-9]/g, '-');
         const name = entity.name;
         const type = entity.label || 'Concept';
-        const metadata = JSON.stringify({ description: entity.description || '', source: item.source || 'brain-provider' });
+        const graphSource = item.source || 'brain-provider';
+        const metadata = JSON.stringify({ description: entity.description || '', source: graphSource });
         try {
-          const stmt = await conn.prepare('MERGE (e:Entity {id: $id}) SET e.name = $name, e.type = $type, e.metadata = $metadata');
-          await conn.execute(stmt, { id, name, type, metadata });
+          const stmt = await conn.prepare('MERGE (e:Entity {id: $id}) SET e.name = $name, e.type = $type, e.metadata = $metadata, e.source = $source');
+          await conn.execute(stmt, { id, name, type, metadata, source: graphSource });
         } catch (e) { /* skip */ }
       }
 
@@ -211,9 +212,10 @@ async function runDrain() {
         const toId = entityIdMap[rel.to];
         if (!fromId || !toId) continue;
         try {
+          const edgeSource = item.source || 'brain-provider';
           await conn.query(
             `MATCH (a:Entity {id: '${esc(fromId)}'}), (b:Entity {id: '${esc(toId)}'})` +
-            ` CREATE (a)-[:CONNECTS {type: '${esc(rel.type || 'RELATES_TO')}', weight: 1.0}]->(b)`
+            ` CREATE (a)-[:CONNECTS {type: '${esc(rel.type || 'RELATES_TO')}', weight: 1.0, source: '${esc(edgeSource)}'}]->(b)`
           );
         } catch (e) { /* skip duplicate */ }
       }
@@ -293,18 +295,21 @@ Rules:
     const id = node.id || `${node.nodeType || "exp"}:${uid()}`;
     const ts = node.timestamp || new Date().toISOString();
     try {
+      const source = node.source || 'local:' + (node.agent || 'unknown');
       if (node.nodeType === "Knowledge") {
         await conn.query(
           `MERGE (k:Knowledge {id: '${esc(id)}'})
            SET k.kind = '${esc(node.kind || "fact")}', k.content = '${esc(node.content || "")}',
-               k.agent = '${esc(node.agent || "")}', k.timestamp = '${esc(ts)}'`
+               k.agent = '${esc(node.agent || "")}', k.timestamp = '${esc(ts)}',
+               k.source = '${esc(source)}'`
         );
       } else {
         await conn.query(
           `MERGE (x:Experience {id: '${esc(id)}'})
            SET x.type = '${esc(node.type || "task_run")}', x.agent = '${esc(node.agent || "")}',
                x.timestamp = '${esc(ts)}', x.outcome = '${esc(node.outcome || "")}',
-               x.summary = '${esc(node.summary || "")}', x.metadata = '${esc(JSON.stringify(node.metadata || {}))}'`
+               x.summary = '${esc(node.summary || "")}', x.metadata = '${esc(JSON.stringify(node.metadata || {}))}',
+               x.source = '${esc(source)}'`
         );
       }
     } catch (e) { log(`Node create error: ${e.message}`); }
@@ -342,9 +347,11 @@ async function runMaintain() {
       try { await conn.query(`MATCH (e:Experience {id: '${esc(row.id)}'}) DETACH DELETE e`); pruned++; } catch { /* skip */ }
     }
   } catch (e) { log(`Prune error: ${e.message}`); }
+  const now = new Date().toISOString();
   for (const rel of ["DERIVED", "ABOUT", "INVOLVES", "RELATES_TO", "FOLLOWS"]) {
     try {
       await conn.query(`MATCH ()-[r:${rel}]->() SET r.weight = r.weight + 1`);
+      await conn.query(`MATCH (x:Experience)-[r:${rel}]->() SET x.last_accessed_at = '${esc(now)}'`);
       const rows = await (await conn.query(`MATCH ()-[r:${rel}]->() RETURN count(r) AS c`)).getAll();
       strengthened += rows[0]?.c || 0;
     } catch (e) { log(`Strengthen ${rel} error: ${e.message}`); }
@@ -373,10 +380,11 @@ function fallbackExtract(items) {
   for (const item of items) {
     const id = `${item.type === "knowledge" ? "know" : "exp"}:${uid()}`;
     const ts = item.timestamp || new Date().toISOString();
+    const source = item.source || 'local:' + (item.agent || 'unknown');
     if (item.type === "knowledge") {
-      nodes.push({ nodeType: "Knowledge", id, kind: item.kind || "fact", content: item.content || item.summary || "", agent: item.agent || "", timestamp: ts });
+      nodes.push({ nodeType: "Knowledge", id, kind: item.kind || "fact", content: item.content || item.summary || "", agent: item.agent || "", timestamp: ts, source });
     } else {
-      nodes.push({ nodeType: "Experience", id, type: item.type || "task_run", agent: item.agent || "", outcome: item.outcome || "", summary: item.summary || "", timestamp: ts, metadata: item.metadata || {} });
+      nodes.push({ nodeType: "Experience", id, type: item.type || "task_run", agent: item.agent || "", outcome: item.outcome || "", summary: item.summary || "", timestamp: ts, metadata: item.metadata || {}, source });
     }
     if (item.agent && !seen.has(item.agent)) {
       seen.add(item.agent);
