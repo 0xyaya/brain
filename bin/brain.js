@@ -153,29 +153,52 @@ switch (cmd) {
       }
       console.log(JSON.stringify(matches.slice(0, 5)));
     } else {
-      // BM25 search via qmd CLI
+      // Direct graph text search (CONTAINS across all node types)
+      const { getDb, closeDb } = await import("../src/db.js");
       try {
-        const out = execSync(`qmd search ${JSON.stringify(query)} -c brain --json -n 5`, { encoding: 'utf-8' });
-        const results = JSON.parse(out);
-        const compact = results.map(r => {
-          const meta = {};
-          const text = r.snippet || "";
-          if (r.title) meta.id = r.title;
-          const kindMatch = text.match(/^kind: (.+)/m);
-          const typeMatch = text.match(/^type: (.+)/m);
-          if (kindMatch) meta.kind = kindMatch[1];
-          else if (typeMatch) meta.type = typeMatch[1];
-          const contentMatch = text.match(/^content: (.+)/m);
-          const summaryMatch = text.match(/^summary: (.+)/m);
-          if (contentMatch) meta.content = contentMatch[1].slice(0, 200);
-          else if (summaryMatch) meta.summary = summaryMatch[1].slice(0, 200);
-          const agentMatch = text.match(/^agent: (.+)/m);
-          if (agentMatch) meta.agent = agentMatch[1];
-          return meta;
-        }).filter(m => m.id);
+        const conn = await getDb(true);
+        const q = query.toLowerCase();
+        const results = [];
+
+        // Search Knowledge nodes
+        try {
+          const stmt = await conn.prepare(
+            `MATCH (n:Knowledge) WHERE lower(n.content) CONTAINS $q RETURN n.id AS id, n.kind AS kind, n.content AS content, n.agent AS agent, 'Knowledge' AS type LIMIT 5`
+          );
+          const r = await conn.execute(stmt, { q });
+          results.push(...(await r.getAll()));
+        } catch { /* skip if table empty */ }
+
+        // Search Experience nodes
+        try {
+          const stmt = await conn.prepare(
+            `MATCH (n:Experience) WHERE lower(n.summary) CONTAINS $q RETURN n.id AS id, n.type AS kind, n.summary AS content, n.agent AS agent, 'Experience' AS type LIMIT 5`
+          );
+          const r = await conn.execute(stmt, { q });
+          results.push(...(await r.getAll()));
+        } catch { /* skip if table empty */ }
+
+        // Search Entity nodes (name + description)
+        try {
+          const stmt = await conn.prepare(
+            `MATCH (n:Entity) WHERE lower(n.name) CONTAINS $q OR lower(coalesce(n.description, '')) CONTAINS $q RETURN n.id AS id, n.kind AS kind, n.description AS content, '' AS agent, 'Entity' AS type LIMIT 5`
+          );
+          const r = await conn.execute(stmt, { q });
+          results.push(...(await r.getAll()));
+        } catch { /* skip if table empty */ }
+
+        // Compact output
+        const compact = results.slice(0, 10).map(row => {
+          const out = { id: row.id, type: row.type };
+          if (row.kind) out.kind = row.kind;
+          if (row.content) out.content = String(row.content).slice(0, 200);
+          if (row.agent) out.agent = row.agent;
+          return out;
+        });
+
+        await closeDb();
         console.log(JSON.stringify(compact));
       } catch (e) {
-        // If qmd not available or no results
         console.log("[]");
       }
     }
