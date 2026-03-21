@@ -34,47 +34,90 @@ export async function initSchema() {
 
   // Node tables
   const nodeTables = [
-    `CREATE NODE TABLE IF NOT EXISTS Experience (
-      id STRING,
-      type STRING,
-      agent STRING,
-      timestamp STRING,
-      outcome STRING,
-      summary STRING,
-      metadata STRING,
-      PRIMARY KEY(id)
+    `CREATE NODE TABLE IF NOT EXISTS Entity (
+      id          STRING,
+      name        STRING,
+      kind        STRING,
+      description STRING,
+      source      STRING,
+      embedding   STRING,
+      created_at  STRING,
+      PRIMARY KEY (id)
     )`,
     `CREATE NODE TABLE IF NOT EXISTS Knowledge (
-      id STRING,
-      kind STRING,
-      content STRING,
-      agent STRING,
-      timestamp STRING,
-      PRIMARY KEY(id)
+      id          STRING,
+      content     STRING,
+      kind        STRING,
+      source      STRING,
+      confidence  DOUBLE,
+      agent       STRING,
+      timestamp   STRING,
+      PRIMARY KEY (id)
     )`,
-    `CREATE NODE TABLE IF NOT EXISTS Entity (
-      id STRING,
-      type STRING,
-      name STRING,
-      metadata STRING,
-      PRIMARY KEY(id)
+    `CREATE NODE TABLE IF NOT EXISTS Experience (
+      id               STRING,
+      type             STRING,
+      agent            STRING,
+      outcome          STRING,
+      summary          STRING,
+      period           STRING,
+      last_accessed_at STRING,
+      metadata         STRING,
+      source           STRING,
+      timestamp        STRING,
+      PRIMARY KEY (id)
+    )`,
+    `CREATE NODE TABLE IF NOT EXISTS Summary (
+      id         STRING,
+      title      STRING,
+      content    STRING,
+      source     STRING,
+      source_ids STRING,
+      created_at STRING,
+      PRIMARY KEY (id)
     )`,
   ];
 
-  // Edge tables (weight defaults to 1, incremented by nightly maintenance)
+  // Edge tables
   const edgeTables = [
-    `CREATE REL TABLE IF NOT EXISTS DERIVED (FROM Experience TO Knowledge, weight INT64 DEFAULT 1)`,
-    `CREATE REL TABLE IF NOT EXISTS ABOUT (FROM Knowledge TO Entity, weight INT64 DEFAULT 1)`,
-    `CREATE REL TABLE IF NOT EXISTS INVOLVES (FROM Experience TO Entity, weight INT64 DEFAULT 1)`,
-    `CREATE REL TABLE IF NOT EXISTS RELATES_TO (FROM Knowledge TO Knowledge, weight INT64 DEFAULT 1)`,
-    `CREATE REL TABLE IF NOT EXISTS FOLLOWS (FROM Experience TO Experience, weight INT64 DEFAULT 1)`,
-    `CREATE REL TABLE IF NOT EXISTS CONNECTS (FROM Entity TO Entity, type STRING DEFAULT 'RELATES_TO', weight FLOAT DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS CONNECTS   (FROM Entity TO Entity,        why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS ABOUT      (FROM Knowledge TO Entity,     why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS INVOLVES   (FROM Experience TO Entity,    source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS DERIVED    (FROM Experience TO Knowledge, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS RELATES_TO (FROM Knowledge TO Knowledge,  why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS FOLLOWS    (FROM Experience TO Experience, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS SUMMARIZES (FROM Summary TO Entity,       source STRING)`,
   ];
 
-  // Migrate existing edge tables: add weight column if missing
-  for (const rel of ["DERIVED", "ABOUT", "INVOLVES", "RELATES_TO", "FOLLOWS", "CONNECTS"]) {
+  // Migrate existing tables: add new columns if missing
+  const migrations = [
+    // Entity new columns
+    ["Entity", "kind", "STRING"],
+    ["Entity", "description", "STRING"],
+    ["Entity", "source", "STRING"],
+    ["Entity", "embedding", "STRING"],
+    ["Entity", "created_at", "STRING"],
+    // Knowledge new columns
+    ["Knowledge", "source", "STRING"],
+    ["Knowledge", "confidence", "DOUBLE"],
+    // Experience new columns
+    ["Experience", "period", "STRING"],
+    ["Experience", "last_accessed_at", "STRING"],
+    ["Experience", "source", "STRING"],
+    // Edge new columns
+    ["CONNECTS", "why", "STRING"],
+    ["CONNECTS", "source", "STRING"],
+    ["ABOUT", "why", "STRING"],
+    ["ABOUT", "source", "STRING"],
+    ["INVOLVES", "source", "STRING"],
+    ["DERIVED", "source", "STRING"],
+    ["RELATES_TO", "why", "STRING"],
+    ["RELATES_TO", "source", "STRING"],
+    ["FOLLOWS", "source", "STRING"],
+  ];
+  for (const [table, col, type] of migrations) {
     try {
-      await conn.query(`ALTER TABLE ${rel} ADD weight INT64 DEFAULT 1`);
+      await conn.query(`ALTER TABLE ${table} ADD ${col} ${type}`);
     } catch { /* column already exists — ignore */ }
   }
 
