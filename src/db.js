@@ -100,10 +100,12 @@ export async function initSchema() {
     // Knowledge new columns
     ["Knowledge", "source", "STRING"],
     ["Knowledge", "confidence", "DOUBLE"],
+    ["Knowledge", "embedding", "STRING"],
     // Experience new columns
     ["Experience", "period", "STRING"],
     ["Experience", "last_accessed_at", "STRING"],
     ["Experience", "source", "STRING"],
+    ["Experience", "embedding", "STRING"],
     // Edge new columns
     ["CONNECTS", "why", "STRING"],
     ["CONNECTS", "source", "STRING"],

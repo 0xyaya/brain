@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
 import { initSchema, getDb, closeDb } from "../src/db.js";
+import { embed, saveEmbedding } from "../src/embed.js";
 import crypto from "crypto";
 
 const BRAIN_DIR = path.join(os.homedir(), "corpus", "brain");
@@ -42,7 +43,7 @@ const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 const shellEscape = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
 
 // --- Parse CLI flags ---
-const flags = { drain: false, focus: false, recent: false, permanent: false, daily: false, maintain: false, input: null };
+const flags = { drain: false, focus: false, recent: false, permanent: false, daily: false, maintain: false, embed: false, input: null };
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
   if (a === "--input" && process.argv[i + 1]) flags.input = process.argv[++i];
@@ -197,6 +198,9 @@ async function runDrain() {
         try {
           const stmt = await conn.prepare('MERGE (e:Entity {id: $id}) SET e.name = $name, e.type = $type, e.metadata = $metadata, e.source = $source');
           await conn.execute(stmt, { id, name, type, metadata, source: graphSource });
+          const embText = [name, entity.description || ''].filter(Boolean).join(' ');
+          const embVec = await embed(embText);
+          if (embVec) saveEmbedding(id, embVec);
         } catch (e) { /* skip */ }
       }
 
@@ -303,6 +307,8 @@ Rules:
                k.agent = '${esc(node.agent || "")}', k.timestamp = '${esc(ts)}',
                k.source = '${esc(source)}'`
         );
+        const embVec = await embed(node.content || "");
+        if (embVec) saveEmbedding(id, embVec);
       } else {
         await conn.query(
           `MERGE (x:Experience {id: '${esc(id)}'})
@@ -311,6 +317,8 @@ Rules:
                x.summary = '${esc(node.summary || "")}', x.metadata = '${esc(JSON.stringify(node.metadata || {}))}',
                x.source = '${esc(source)}'`
         );
+        const embVec = await embed(node.summary || "");
+        if (embVec) saveEmbedding(id, embVec);
       }
     } catch (e) { log(`Node create error: ${e.message}`); }
   }
@@ -348,7 +356,8 @@ async function runMaintain() {
     }
   } catch (e) { log(`Prune error: ${e.message}`); }
   const now = new Date().toISOString();
-  for (const rel of ["DERIVED", "ABOUT", "INVOLVES", "RELATES_TO", "FOLLOWS"]) {
+  // ABOUT crashes LadybugDB (csr_node_group.cpp assertion) — skip until upstream fix
+  for (const rel of ["DERIVED", "INVOLVES", "RELATES_TO", "FOLLOWS"]) {
     try {
       await conn.query(`MATCH ()-[r:${rel}]->() SET r.weight = r.weight + 1`);
       await conn.query(`MATCH (x:Experience)-[r:${rel}]->() SET x.last_accessed_at = '${esc(now)}'`);
@@ -424,16 +433,52 @@ async function exportIndex() {
   } catch (e) { log(`exportIndex error: ${e.message}`); }
 }
 
+// --- Backfill embeddings for existing nodes (stores in embeddings.json) ---
+async function runEmbed() {
+  await initSchema();
+  const conn = await getDb(true);
+  const { saveEmbeddings, loadEmbeddings } = await import("../src/embed.js");
+  const existing = loadEmbeddings();
+  const batch = {};
+  let count = 0;
+  const tables = [
+    { table: "Knowledge", textField: "content" },
+    { table: "Experience", textField: "summary" },
+    { table: "Entity",     textField: "name" },
+  ];
+  for (const { table, textField } of tables) {
+    try {
+      const rows = await safeQuery(conn, `MATCH (n:${table}) RETURN n.id AS id, n.${textField} AS text`);
+      let tableCount = 0;
+      for (const row of rows) {
+        if (!row.text || existing[row.id]) continue; // skip already embedded
+        try {
+          const vec = await embed(row.text);
+          if (!vec) continue;
+          batch[row.id] = vec;
+          count++;
+          tableCount++;
+        } catch (e) { log(`Embed error (${row.id}): ${e.message}`); }
+      }
+      log(`Embed: backfilled ${tableCount} ${table} nodes`);
+    } catch (e) { log(`Embed ${table} error: ${e.message}`); }
+  }
+  await closeDb();
+  if (count > 0) saveEmbeddings(batch);
+  log(`Embed backfill done. ${count} nodes embedded.`);
+}
+
 // --- Main ---
 async function run() {
   acquireLock();
   try {
     if (flags.maintain) await runMaintain();
     if (flags.drain || flags.input) await runDrain();
-    else if (flags.maintain || flags.focus || flags.recent || flags.permanent || flags.daily) {
+    else if (flags.maintain || flags.focus || flags.recent || flags.permanent || flags.daily || flags.embed) {
       // exportIndex is called inside runDrain; call it explicitly when drain didn't run
       await exportIndex();
     }
+    if (flags.embed) await runEmbed();
     if (flags.focus) await runFocus();
     if (flags.recent) await runRecent();
     if (flags.permanent) await runPermanent();

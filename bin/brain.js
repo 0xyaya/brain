@@ -14,17 +14,28 @@ fs.mkdirSync(BRAIN_DIR, { recursive: true });
 const cmd = process.argv[2];
 const args = process.argv.slice(3);
 
+// Resolve agent ID: --agent flag > BRAIN_AGENT_ID env > config file > "neo"
+function resolveAgentId(flags = {}) {
+  if (flags.agent) return flags.agent;
+  if (process.env.BRAIN_AGENT_ID) return process.env.BRAIN_AGENT_ID;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(BRAIN_DIR, "config.json"), "utf-8"));
+    if (cfg.agentId) return cfg.agentId;
+  } catch { /* no config file */ }
+  return "neo";
+}
+
 if (cmd === "--help" || cmd === "-h" || !cmd) {
   console.log(`brain — agent memory CLI
 
 Usage:
-  brain push [--buffer <file>] <json>       Push experience/knowledge to queue
-  brain push --graph <file>                 Import entity graph from JSON file
-  brain recall [--buffer <file>] <query>    Search knowledge (vector or text)
+  brain push [--buffer <file>] [--agent <id>] <json>       Push experience/knowledge to queue
+  brain push --graph <file> [--agent <id>]                  Import entity graph from JSON file
+  brain recall [--buffer <file>] [--agent <id>] [--days N] <query>  Search knowledge + daily logs
   brain explore <entity>                    Graph neighborhood of an entity
   brain get <id>                            Get full node by ID
   brain flush --buffer <file>               Flush buffer file via consolidate
-  brain consolidate [--flags]               Run consolidate pipeline
+  brain consolidate [--agent <id>] [--flags]  Run consolidate pipeline
 
 Consolidate flags:
   --drain       Process queue.jsonl (LLM extraction)
@@ -48,6 +59,8 @@ function parseFlags(args) {
       flags.source = args[++i];
     } else if (args[i] === "--days" && args[i + 1]) {
       flags.days = args[++i];
+    } else if (args[i] === "--agent" && args[i + 1]) {
+      flags.agent = args[++i];
     } else {
       rest.push(args[i]);
     }
@@ -59,11 +72,14 @@ function isConsolidateRunning() {
   return fs.existsSync(LOCK_PATH);
 }
 
-function spawnConsolidate(...args) {
+function spawnConsolidate(agentId, ...args) {
   if (isConsolidateRunning()) return;
+  const env = { ...process.env };
+  if (agentId) env.BRAIN_AGENT_ID = agentId;
   const child = spawn("node", [path.join(BIN_DIR, "consolidate.js"), ...args], {
     detached: true,
     stdio: "ignore",
+    env,
   });
   child.unref();
 }
@@ -86,7 +102,7 @@ switch (cmd) {
       }
       fs.appendFileSync(target, JSON.stringify(item) + "\n");
       if (!flags.buffer) {
-        spawnConsolidate("--drain");
+        spawnConsolidate(resolveAgentId(flags), "--drain");
       }
       console.log("OK");
       break;
@@ -119,7 +135,7 @@ switch (cmd) {
     fs.appendFileSync(target, json + "\n");
 
     if (!flags.buffer) {
-      spawnConsolidate("--drain");
+      spawnConsolidate(resolveAgentId(flags), "--drain");
     }
 
     console.log("OK");
@@ -155,40 +171,58 @@ switch (cmd) {
       }
       console.log(JSON.stringify(matches.slice(0, 5)));
     } else {
+      const { getDb, closeDb } = await import("../src/db.js");
+      const { embed, cosine, loadEmbeddings } = await import("../src/embed.js");
       const results = [];
 
-      // 1. BM25 search over index.md (graph: Knowledge + Experience + Entity) via qmd
+      // 1. Vector search over graph using embeddings.json
       try {
-        const out = execSync(`qmd search ${JSON.stringify(query)} -c brain --json -n 5`, { encoding: 'utf-8' });
-        const qmdResults = JSON.parse(out);
-        for (const r of qmdResults) {
-          const meta = { source: "graph" };
-          const text = r.snippet || "";
-          if (r.title) meta.id = r.title;
-          const kindMatch = text.match(/^kind: (.+)/m);
-          const typeMatch = text.match(/^type: (.+)/m);
-          if (kindMatch) meta.kind = kindMatch[1];
-          else if (typeMatch) meta.type = typeMatch[1];
-          const contentMatch = text.match(/^content: (.+)/m);
-          const summaryMatch = text.match(/^summary: (.+)/m);
-          const descMatch = text.match(/^description: (.+)/m);
-          if (contentMatch) meta.content = contentMatch[1].slice(0, 200);
-          else if (summaryMatch) meta.content = summaryMatch[1].slice(0, 200);
-          else if (descMatch) meta.content = descMatch[1].slice(0, 200);
-          const agentMatch = text.match(/^agent: (.+)/m);
-          if (agentMatch) meta.agent = agentMatch[1];
-          if (meta.id) results.push(meta);
-        }
-      } catch { /* qmd not available or no results */ }
+        const queryVec = await embed(query);
+        if (queryVec) {
+          const store = loadEmbeddings();
+          const nodeIds = Object.keys(store);
+          if (nodeIds.length > 0) {
+            // Score all stored embeddings
+            const scored = nodeIds.map(id => ({
+              id,
+              score: cosine(queryVec, store[id])
+            })).sort((a, b) => b.score - a.score);
 
-      // 2. Search recent daily memory logs (last N days)
+            // Fetch node details from DB for top candidates
+            const conn = await getDb(true);
+            for (const { id, score } of scored.slice(0, 10)) {
+              if (score < 0.3) break;
+              try {
+                const table = id.startsWith("entity:") ? "Entity"
+                  : id.startsWith("know:") ? "Knowledge" : "Experience";
+                const textField = table === "Knowledge" ? "content"
+                  : table === "Experience" ? "summary" : "name";
+                const rows = await (await conn.query(
+                  `MATCH (n:${table} {id: '${id}'}) RETURN n.${textField} AS text, n.kind AS kind, n.agent AS agent`
+                )).getAll();
+                if (rows[0]) {
+                  results.push({
+                    source: "graph",
+                    id,
+                    type: table.toLowerCase(),
+                    kind: rows[0].kind || null,
+                    content: (rows[0].text || "").slice(0, 200),
+                    agent: rows[0].agent || null,
+                    score: Math.round(score * 100) / 100,
+                  });
+                }
+              } catch { /* skip */ }
+            }
+            await closeDb();
+          }
+        }
+      } catch (e) {
+        // Embedding unavailable — silent fallback
+      }
+
+      // 2. Keyword search over recent daily memory logs (last N days)
       const days = flags.days ? parseInt(flags.days) : 3;
-      const agentId = process.env.BRAIN_AGENT_ID || (() => {
-        try {
-          const cfg = JSON.parse(fs.readFileSync(path.join(BRAIN_DIR, "config.json"), "utf-8"));
-          return cfg.agentId || "neo";
-        } catch { return "neo"; }
-      })();
+      const agentId = resolveAgentId(flags);
       const dailyDir = path.join(os.homedir(), "corpus", "users", agentId, "memory");
       const queryLower = query.toLowerCase();
       try {
@@ -196,25 +230,20 @@ switch (cmd) {
         for (let i = 0; i < days; i++) {
           const d = new Date(now);
           d.setDate(d.getDate() - i);
-          const dateStr = d.toISOString().slice(0, 10); // YYYY-MM-DD
+          const dateStr = d.toISOString().slice(0, 10);
           const logPath = path.join(dailyDir, `${dateStr}.md`);
           if (!fs.existsSync(logPath)) continue;
           const content = fs.readFileSync(logPath, "utf-8");
           if (!content.toLowerCase().includes(queryLower)) continue;
-          // Extract matching paragraphs (split on double newline)
           const paras = content.split(/\n{2,}/);
           for (const para of paras) {
             if (para.toLowerCase().includes(queryLower)) {
-              results.push({
-                source: "daily",
-                date: dateStr,
-                content: para.trim().slice(0, 300),
-              });
+              results.push({ source: "daily", date: dateStr, content: para.trim().slice(0, 300) });
               if (results.filter(r => r.source === "daily").length >= 3) break;
             }
           }
         }
-      } catch { /* no daily dir or unreadable */ }
+      } catch { /* no daily dir */ }
 
       console.log(JSON.stringify(results.slice(0, 10)));
     }
@@ -254,7 +283,7 @@ switch (cmd) {
       console.error("Buffer file not found:", flags.buffer);
       process.exit(1);
     }
-    spawnConsolidate("--input", flags.buffer);
+    spawnConsolidate(resolveAgentId(flags), "--input", flags.buffer);
     console.log("OK");
     break;
   }
@@ -291,11 +320,12 @@ switch (cmd) {
   }
 
   case "consolidate": {
+    const { flags: cFlags } = parseFlags(args);
     const consolidateFlags = args.filter(a => a.startsWith("--"));
     if (consolidateFlags.length === 0) {
       consolidateFlags.push("--drain", "--focus", "--recent");
     }
-    spawnConsolidate(...consolidateFlags);
+    spawnConsolidate(resolveAgentId(cFlags), ...consolidateFlags);
     console.log("OK — consolidate spawned with: " + consolidateFlags.join(" "));
     break;
   }
