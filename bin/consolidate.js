@@ -37,11 +37,19 @@ function log(msg) {
 
 function acquireLock() {
   if (fs.existsSync(LOCK_PATH)) {
-    if (Date.now() - fs.statSync(LOCK_PATH).mtimeMs < 5 * 60 * 1000) {
-      log("consolidate already running (lock exists). Exiting.");
-      process.exit(0);
-    }
-    log("Stale lock detected, removing.");
+    try {
+      const pid = parseInt(fs.readFileSync(LOCK_PATH, "utf-8").trim(), 10);
+      if (pid && !isNaN(pid)) {
+        try {
+          process.kill(pid, 0); // throws if dead
+          log("consolidate already running (lock exists). Exiting.");
+          process.exit(0);
+        } catch {
+          log(`Stale lock (pid ${pid} dead), removing.`);
+        }
+      }
+    } catch { /* malformed lock file */ }
+    fs.unlinkSync(LOCK_PATH);
   }
   fs.writeFileSync(LOCK_PATH, String(process.pid));
 }
@@ -66,6 +74,29 @@ if (!Object.values(flags).some(Boolean)) {
 }
 
 // --- MEMORY.md section management ---
+async function upsertMemoryNode(kind, content) {
+  const ts = new Date().toISOString();
+  const memId = `memory:${AGENT_ID}`;
+  const nodeId = `memory:${AGENT_ID}:${kind}`;
+  const edgeType = kind === "permanent" ? "HAS_PERMANENT" : kind === "focus" ? "HAS_FOCUS" : "HAS_RECENT";
+  try {
+    await withDb(false, async (conn) => {
+      // Ensure Entity node exists
+      await safeQuery(conn, `MERGE (e:Entity {id: 'entity:${AGENT_ID}'}) SET e.name = '${AGENT_ID}', e.type = 'agent', e.source = 'local:brain'`);
+      // Ensure Memory root node exists
+      await safeQuery(conn, `MERGE (m:Memory {id: '${memId}'}) SET m.agent = '${AGENT_ID}', m.kind = 'root', m.updated_at = '${ts}'`);
+      // Ensure Entity → HAS_MEMORY → Memory edge
+      await safeQuery(conn, `MATCH (e:Entity {id: 'entity:${AGENT_ID}'}), (m:Memory {id: '${memId}'}) MERGE (e)-[:HAS_MEMORY]->(m)`);
+      // Upsert the specific memory section node
+      const escaped = content.replace(/'/g, "\\'").slice(0, 2000);
+      await safeQuery(conn, `MERGE (n:Memory {id: '${nodeId}'}) SET n.agent = '${AGENT_ID}', n.kind = '${kind}', n.content = '${escaped}', n.updated_at = '${ts}'`);
+      // Ensure Memory root → HAS_<KIND> → section node edge
+      await safeQuery(conn, `MATCH (m:Memory {id: '${memId}'}), (n:Memory {id: '${nodeId}'}) MERGE (m)-[:${edgeType}]->(n)`);
+    });
+    log(`Memory node upserted: ${nodeId}`);
+  } catch (e) { log(`Memory node upsert error (${kind}): ${e.message}`); }
+}
+
 function updateMemorySection(section, content) {
   fs.mkdirSync(path.dirname(MEMORY_MD_PATH), { recursive: true });
   let md = fs.existsSync(MEMORY_MD_PATH) ? fs.readFileSync(MEMORY_MD_PATH, "utf-8") : "";
@@ -77,11 +108,21 @@ function updateMemorySection(section, content) {
 }
 
 // --- DB query helper ---
-async function withDb(readOnly, fn) {
+// Single shared write connection for the entire consolidate process.
+// LadybugDB caches one connection; we init in write mode so all operations
+// (reads and writes) share it. closeDb() is intentionally never called
+// mid-process — the DB flushes on process exit.
+let _sharedConn = null;
+async function getSharedConn() {
+  if (_sharedConn) return _sharedConn;
   await initSchema();
-  const conn = await getDb(readOnly);
-  try { return await fn(conn); }
-  finally { await closeDb(); }
+  _sharedConn = await getDb(false); // write mode
+  return _sharedConn;
+}
+
+async function withDb(readOnly, fn) {
+  const conn = await getSharedConn();
+  return fn(conn);
 }
 
 async function safeQuery(conn, sql) {
@@ -93,13 +134,14 @@ async function safeQuery(conn, sql) {
 async function runFocus() {
   try {
     const threads = await withDb(true, (conn) =>
-      safeQuery(conn, `MATCH (k:Knowledge {kind: 'thread'}) RETURN k.content AS content, k.timestamp AS ts ORDER BY k.timestamp DESC LIMIT 5`)
+      safeQuery(conn, `MATCH (k:Knowledge {kind: 'thread'}) WHERE k.agent = '${esc(AGENT_ID)}' OR k.agent = '' RETURN k.content AS content, k.timestamp AS ts ORDER BY k.timestamp DESC LIMIT 5`)
     );
     let content = "# Focus\n";
     content += threads.length > 0
       ? threads.map(t => `- ${(t.content || "").slice(0, 120)}`).join("\n") + "\n"
       : "_No open threads_\n";
     updateMemorySection("FOCUS", content);
+    await upsertMemoryNode("focus", content);
     log(`Focus: ${threads.length} threads`);
   } catch (e) { log(`Focus error: ${e.message}`); }
 }
@@ -109,8 +151,8 @@ async function runRecent() {
   try {
     const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
     const [experiences, knowledges] = await withDb(true, async (conn) => [
-      await safeQuery(conn, `MATCH (e:Experience) WHERE e.timestamp > '${esc(cutoff)}' RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome ORDER BY e.timestamp DESC LIMIT 5`),
-      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.timestamp > '${esc(cutoff)}' AND k.kind IN ['fact','decision'] RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 8`),
+      await safeQuery(conn, `MATCH (e:Experience) WHERE e.timestamp > '${esc(cutoff)}' AND (e.agent = '${esc(AGENT_ID)}' OR e.agent = '') RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome ORDER BY e.timestamp DESC LIMIT 5`),
+      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.timestamp > '${esc(cutoff)}' AND k.kind IN ['fact','decision'] AND (k.agent = '${esc(AGENT_ID)}' OR k.agent = '') RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 8`),
     ]);
     let content = "# Recent\n";
     for (const e of experiences) {
@@ -121,6 +163,7 @@ async function runRecent() {
     }
     if (!experiences.length && !knowledges.length) content += "_No recent activity_\n";
     updateMemorySection("RECENT", content);
+    await upsertMemoryNode("recent", content);
     log(`Recent: ${experiences.length} experiences, ${knowledges.length} knowledges`);
   } catch (e) { log(`Recent error: ${e.message}`); }
 }
@@ -129,7 +172,7 @@ async function runRecent() {
 async function runPermanent() {
   try {
     const knowledges = await withDb(true, (conn) =>
-      safeQuery(conn, `MATCH (k:Knowledge) RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 20`)
+      safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' OR k.agent = '' RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 20`)
     );
     if (!knowledges.length) {
       updateMemorySection("PERMANENT", "# Permanent\n_No knowledge yet_\n");
@@ -146,7 +189,9 @@ async function runPermanent() {
     } catch {
       summary = knowledges.slice(0, 10).map(k => `- (${k.kind || "fact"}) ${(k.content || "").slice(0, 120)}`).join("\n");
     }
-    updateMemorySection("PERMANENT", `# Permanent\n${summary}\n`);
+    const permanentContent = `# Permanent\n${summary}\n`;
+    updateMemorySection("PERMANENT", permanentContent);
+    await upsertMemoryNode("permanent", permanentContent);
     log(`Permanent: summarized ${knowledges.length} knowledges`);
   } catch (e) { log(`Permanent error: ${e.message}`); }
 }
@@ -159,8 +204,8 @@ async function runDaily() {
     const dayStart = new Date(today); dayStart.setHours(0, 0, 0, 0);
     const cutoff = dayStart.toISOString();
     const [experiences, knowledges] = await withDb(true, async (conn) => [
-      await safeQuery(conn, `MATCH (e:Experience) WHERE e.timestamp > '${esc(cutoff)}' RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome, e.timestamp AS ts ORDER BY e.timestamp ASC`),
-      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.timestamp > '${esc(cutoff)}' RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp ASC`),
+      await safeQuery(conn, `MATCH (e:Experience) WHERE e.timestamp > '${esc(cutoff)}' AND (e.agent = '${esc(AGENT_ID)}' OR e.agent = '') RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome, e.timestamp AS ts ORDER BY e.timestamp ASC`),
+      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.timestamp > '${esc(cutoff)}' AND (k.agent = '${esc(AGENT_ID)}' OR k.agent = '') RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp ASC`),
     ]);
     let md = `# ${dateStr}\n\n`;
     if (experiences.length) {

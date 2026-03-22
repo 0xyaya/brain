@@ -78,17 +78,29 @@ export async function initSchema() {
       created_at STRING,
       PRIMARY KEY (id)
     )`,
+    `CREATE NODE TABLE IF NOT EXISTS Memory (
+      id         STRING,
+      agent      STRING,
+      kind       STRING,
+      content    STRING,
+      updated_at STRING,
+      PRIMARY KEY (id)
+    )`,
   ];
 
   // Edge tables
   const edgeTables = [
-    `CREATE REL TABLE IF NOT EXISTS CONNECTS   (FROM Entity TO Entity,        why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS ABOUT      (FROM Knowledge TO Entity,     why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS INVOLVES   (FROM Experience TO Entity,    source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS DERIVED    (FROM Experience TO Knowledge, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS RELATES_TO (FROM Knowledge TO Knowledge,  why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS FOLLOWS    (FROM Experience TO Experience, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS SUMMARIZES (FROM Summary TO Entity,       source STRING)`,
+    `CREATE REL TABLE IF NOT EXISTS CONNECTS    (FROM Entity TO Entity,        why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS ABOUT       (FROM Knowledge TO Entity,     why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS INVOLVES    (FROM Experience TO Entity,    source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS DERIVED     (FROM Experience TO Knowledge, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS RELATES_TO  (FROM Knowledge TO Knowledge,  why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS FOLLOWS     (FROM Experience TO Experience, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS SUMMARIZES  (FROM Summary TO Entity,       source STRING)`,
+    `CREATE REL TABLE IF NOT EXISTS HAS_MEMORY  (FROM Entity TO Memory,        source STRING)`,
+    `CREATE REL TABLE IF NOT EXISTS HAS_PERMANENT (FROM Memory TO Memory,      source STRING)`,
+    `CREATE REL TABLE IF NOT EXISTS HAS_FOCUS   (FROM Memory TO Memory,        source STRING)`,
+    `CREATE REL TABLE IF NOT EXISTS HAS_RECENT  (FROM Memory TO Memory,        source STRING)`,
   ];
 
   // Migrate existing tables: add new columns if missing

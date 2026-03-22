@@ -97,7 +97,16 @@ function parseFlags(args) {
 }
 
 function isConsolidateRunning() {
-  return fs.existsSync(LOCK_PATH);
+  if (!fs.existsSync(LOCK_PATH)) return false;
+  try {
+    const pid = parseInt(fs.readFileSync(LOCK_PATH, "utf-8").trim(), 10);
+    if (pid && !isNaN(pid)) {
+      try { process.kill(pid, 0); return true; } // process alive
+      catch { fs.unlinkSync(LOCK_PATH); return false; } // stale — clear it
+    }
+  } catch { /* malformed lock */ }
+  fs.unlinkSync(LOCK_PATH);
+  return false;
 }
 
 function spawnConsolidate(agentId, ...args) {
@@ -334,7 +343,7 @@ switch (cmd) {
     try {
       const conn = await getDb(true);
       // Try each node type
-      for (const table of ["Experience", "Knowledge", "Entity"]) {
+      for (const table of ["Experience", "Knowledge", "Entity", "Memory"]) {
         try {
           const stmt = await conn.prepare(`MATCH (n:${table} {id: $id}) RETURN n.*`);
           const result = await conn.execute(stmt, { id });
@@ -408,6 +417,27 @@ switch (cmd) {
 <!-- BRAIN:PERMANENT:END -->
 `);
       console.log(`  created ${memoryMdPath}`);
+    }
+
+    // Seed Entity + Memory graph nodes
+    try {
+      const { initSchema, getDb } = await import("../src/db.js");
+      await initSchema();
+      const db = await getDb();
+      const ts = new Date().toISOString();
+      const memId = `memory:${agentId}`;
+      await db.query(`MERGE (e:Entity {id: 'entity:${agentId}'}) SET e.name = '${agentId}', e.type = 'agent', e.source = 'local:brain', e.created_at = '${ts}'`);
+      await db.query(`MERGE (m:Memory {id: '${memId}'}) SET m.agent = '${agentId}', m.kind = 'root', m.content = '', m.updated_at = '${ts}'`);
+      await db.query(`MERGE (p:Memory {id: 'memory:${agentId}:permanent'}) SET p.agent = '${agentId}', p.kind = 'permanent', p.content = '', p.updated_at = '${ts}'`);
+      await db.query(`MERGE (f:Memory {id: 'memory:${agentId}:focus'}) SET f.agent = '${agentId}', f.kind = 'focus', f.content = '', f.updated_at = '${ts}'`);
+      await db.query(`MERGE (r:Memory {id: 'memory:${agentId}:recent'}) SET r.agent = '${agentId}', r.kind = 'recent', r.content = '', r.updated_at = '${ts}'`);
+      await db.query(`MATCH (e:Entity {id: 'entity:${agentId}'}), (m:Memory {id: '${memId}'}) MERGE (e)-[:HAS_MEMORY]->(m)`);
+      await db.query(`MATCH (m:Memory {id: '${memId}'}), (p:Memory {id: 'memory:${agentId}:permanent'}) MERGE (m)-[:HAS_PERMANENT]->(p)`);
+      await db.query(`MATCH (m:Memory {id: '${memId}'}), (f:Memory {id: 'memory:${agentId}:focus'}) MERGE (m)-[:HAS_FOCUS]->(f)`);
+      await db.query(`MATCH (m:Memory {id: '${memId}'}), (r:Memory {id: 'memory:${agentId}:recent'}) MERGE (m)-[:HAS_RECENT]->(r)`);
+      console.log(`  seeded graph: Entity:${agentId} → Memory → permanent/focus/recent`);
+    } catch (e) {
+      console.warn(`  warning: graph seed failed (${e.message}) — run 'brain consolidate --focus --recent' to populate`);
     }
 
     console.log(`✓ Brain initialized`);
