@@ -199,16 +199,9 @@ switch (cmd) {
               try {
                 const table = id.startsWith("entity:") ? "Entity"
                   : id.startsWith("know:") ? "Knowledge" : "Experience";
-                let q;
-                if (table === "Knowledge") {
-                  q = recallAgent
-                    ? `MATCH (n:Knowledge {id: '${id}'}) WHERE n.agent = '${recallAgent}' RETURN n.content AS text, n.kind AS kind, n.agent AS agent`
-                    : `MATCH (n:Knowledge {id: '${id}'}) RETURN n.content AS text, n.kind AS kind, n.agent AS agent`;
-                } else if (table === "Experience") {
-                  q = `MATCH (n:Experience {id: '${id}'}) RETURN n.summary AS text, n.type AS kind, n.agent AS agent`;
-                } else {
-                  q = `MATCH (n:Entity {id: '${id}'}) RETURN n.name AS text, n.kind AS kind`;
-                }
+                const agentFilter = (table !== "Entity" && recallAgent)
+                  ? ` WHERE n.agent = '${recallAgent}'` : "";
+                const q = `MATCH (n:${table} {id: '${id}'})${agentFilter} RETURN n.text AS text, n.kind AS kind, n.agent AS agent`;
                 const rows = await (await conn.query(q)).getAll();
                 if (rows[0]) {
                   results.push({
@@ -280,14 +273,14 @@ switch (cmd) {
 
       // Knowledge nodes ABOUT this entity
       const kStmt = await conn.prepare(
-        `MATCH (k:Knowledge)-[:ABOUT]->(e:Entity {name: $name}) RETURN k.id AS id, k.content AS name, 'knowledge' AS type LIMIT 10`
+        `MATCH (k:Knowledge)-[:ABOUT]->(e:Entity {name: $name}) RETURN k.id AS id, k.text AS name, 'knowledge' AS type LIMIT 10`
       );
       const kRows = await (await conn.execute(kStmt, { name: entity })).getAll();
       results.push(...kRows);
 
       // Experiences INVOLVING this entity
       const xStmt = await conn.prepare(
-        `MATCH (x:Experience)-[:INVOLVES]->(e:Entity {name: $name}) RETURN x.id AS id, x.summary AS name, 'experience' AS type LIMIT 10`
+        `MATCH (x:Experience)-[:INVOLVES]->(e:Entity {name: $name}) RETURN x.id AS id, x.text AS name, 'experience' AS type LIMIT 10`
       );
       const xRows = await (await conn.execute(xStmt, { name: entity })).getAll();
       results.push(...xRows);

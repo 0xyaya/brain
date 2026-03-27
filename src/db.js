@@ -39,6 +39,7 @@ export async function initSchema() {
     `CREATE NODE TABLE IF NOT EXISTS Entity (
       id          STRING,
       name        STRING,
+      text        STRING,
       kind        STRING,
       description STRING,
       source      STRING,
@@ -48,7 +49,7 @@ export async function initSchema() {
     )`,
     `CREATE NODE TABLE IF NOT EXISTS Knowledge (
       id          STRING,
-      content     STRING,
+      text        STRING,
       kind        STRING,
       source      STRING,
       confidence  DOUBLE,
@@ -58,10 +59,10 @@ export async function initSchema() {
     )`,
     `CREATE NODE TABLE IF NOT EXISTS Experience (
       id               STRING,
+      text             STRING,
       type             STRING,
       agent            STRING,
       outcome          STRING,
-      summary          STRING,
       period           STRING,
       last_accessed_at STRING,
       metadata         STRING,
@@ -78,44 +79,35 @@ export async function initSchema() {
       created_at STRING,
       PRIMARY KEY (id)
     )`,
-    `CREATE NODE TABLE IF NOT EXISTS Memory (
-      id         STRING,
-      agent      STRING,
-      kind       STRING,
-      content    STRING,
-      updated_at STRING,
-      PRIMARY KEY (id)
-    )`,
   ];
 
   // Edge tables
   const edgeTables = [
-    `CREATE REL TABLE IF NOT EXISTS CONNECTS    (FROM Entity TO Entity,        why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS ABOUT       (FROM Knowledge TO Entity,     why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS INVOLVES    (FROM Experience TO Entity,    source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS DERIVED     (FROM Experience TO Knowledge, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS RELATES_TO  (FROM Knowledge TO Knowledge,  why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS FOLLOWS     (FROM Experience TO Experience, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS SUMMARIZES  (FROM Summary TO Entity,       source STRING)`,
-    `CREATE REL TABLE IF NOT EXISTS HAS_MEMORY  (FROM Entity TO Memory,        source STRING)`,
-    `CREATE REL TABLE IF NOT EXISTS HAS_PERMANENT (FROM Memory TO Memory,      source STRING)`,
-    `CREATE REL TABLE IF NOT EXISTS HAS_FOCUS   (FROM Memory TO Memory,        source STRING)`,
-    `CREATE REL TABLE IF NOT EXISTS HAS_RECENT  (FROM Memory TO Memory,        source STRING)`,
+    `CREATE REL TABLE IF NOT EXISTS CONNECTS   (FROM Entity TO Entity,        why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS ABOUT      (FROM Knowledge TO Entity,     why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS INVOLVES   (FROM Experience TO Entity,    source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS DERIVED    (FROM Experience TO Knowledge, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS RELATES_TO (FROM Knowledge TO Knowledge,  why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS FOLLOWS    (FROM Experience TO Experience, source STRING, weight DOUBLE DEFAULT 1.0)`,
+    `CREATE REL TABLE IF NOT EXISTS SUMMARIZES (FROM Summary TO Entity,       source STRING)`,
   ];
 
   // Migrate existing tables: add new columns if missing
   const migrations = [
-    // Entity new columns
+    // Entity columns
+    ["Entity", "text", "STRING"],
     ["Entity", "kind", "STRING"],
     ["Entity", "description", "STRING"],
     ["Entity", "source", "STRING"],
     ["Entity", "embedding", "STRING"],
     ["Entity", "created_at", "STRING"],
-    // Knowledge new columns
+    // Knowledge columns
+    ["Knowledge", "text", "STRING"],
     ["Knowledge", "source", "STRING"],
     ["Knowledge", "confidence", "DOUBLE"],
     ["Knowledge", "embedding", "STRING"],
-    // Experience new columns
+    // Experience columns
+    ["Experience", "text", "STRING"],
     ["Experience", "period", "STRING"],
     ["Experience", "last_accessed_at", "STRING"],
     ["Experience", "source", "STRING"],

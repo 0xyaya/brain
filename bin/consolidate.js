@@ -141,11 +141,11 @@ function validateItem(item) {
 async function runFocus() {
   try {
     const threads = await withDb(true, (conn) =>
-      safeQuery(conn, `MATCH (k:Knowledge {kind: 'thread', agent: '${esc(AGENT_ID)}'}) RETURN k.content AS content, k.timestamp AS ts ORDER BY k.timestamp DESC LIMIT 5`)
+      safeQuery(conn, `MATCH (k:Knowledge {kind: 'thread', agent: '${esc(AGENT_ID)}'}) RETURN k.text AS text, k.timestamp AS ts ORDER BY k.timestamp DESC LIMIT 5`)
     );
     let content = "# Focus\n";
     content += threads.length > 0
-      ? threads.map(t => `- ${(t.content || "").slice(0, 120)}`).join("\n") + "\n"
+      ? threads.map(t => `- ${(t.text || "").slice(0, 120)}`).join("\n") + "\n"
       : "_No open threads_\n";
     updateMemorySection("FOCUS", content);
     log(`Focus: ${threads.length} threads`);
@@ -157,15 +157,15 @@ async function runRecent() {
   try {
     const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
     const [experiences, knowledges] = await withDb(true, async (conn) => [
-      await safeQuery(conn, `MATCH (e:Experience) WHERE e.agent = '${esc(AGENT_ID)}' AND e.timestamp > '${esc(cutoff)}' RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome ORDER BY e.timestamp DESC LIMIT 5`),
-      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}' AND k.kind IN ['fact','decision'] RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 8`),
+      await safeQuery(conn, `MATCH (e:Experience) WHERE e.agent = '${esc(AGENT_ID)}' AND e.timestamp > '${esc(cutoff)}' RETURN e.text AS text, e.type AS type, e.outcome AS outcome ORDER BY e.timestamp DESC LIMIT 5`),
+      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}' AND k.kind IN ['fact','decision'] RETURN k.text AS text, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 8`),
     ]);
     let content = "# Recent\n";
     for (const e of experiences) {
-      content += `- ${(e.summary || e.type || "experience").slice(0, 100)}${e.outcome ? ` [${e.outcome}]` : ""}\n`;
+      content += `- ${(e.text || e.type || "experience").slice(0, 100)}${e.outcome ? ` [${e.outcome}]` : ""}\n`;
     }
     for (const k of knowledges) {
-      content += `- ${k.kind ? `(${k.kind}) ` : ""}${(k.content || "").slice(0, 100)}\n`;
+      content += `- ${k.kind ? `(${k.kind}) ` : ""}${(k.text || "").slice(0, 100)}\n`;
     }
     if (!experiences.length && !knowledges.length) content += "_No recent activity_\n";
     updateMemorySection("RECENT", content);
@@ -177,14 +177,14 @@ async function runRecent() {
 async function runPermanent() {
   try {
     const knowledges = await withDb(true, (conn) =>
-      safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 20`)
+      safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' RETURN k.text AS text, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 20`)
     );
     if (!knowledges.length) {
       updateMemorySection("PERMANENT", "# Permanent\n_No knowledge yet_\n");
       log("Permanent: no knowledges to summarize");
       return;
     }
-    const knowledgeList = knowledges.map((k, i) => `${i + 1}. (${k.kind || "fact"}) ${(k.content || "").slice(0, 200)}`).join("\n");
+    const knowledgeList = knowledges.map((k, i) => `${i + 1}. (${k.kind || "fact"}) ${(k.text || "").slice(0, 200)}`).join("\n");
     const prompt = `You are summarizing an agent's most important knowledge into permanent memory facts. Given these ${knowledges.length} knowledge items, distill them into 5-10 concise permanent facts. Return ONLY a markdown bulleted list, no preamble.\n\nKNOWLEDGE ITEMS:\n${knowledgeList}\n\nOutput format:\n- fact one\n- fact two\n...`;
     let summary;
     try {
@@ -207,18 +207,18 @@ async function runDaily() {
     const dayStart = new Date(today); dayStart.setHours(0, 0, 0, 0);
     const cutoff = dayStart.toISOString();
     const [experiences, knowledges] = await withDb(true, async (conn) => [
-      await safeQuery(conn, `MATCH (e:Experience) WHERE e.agent = '${esc(AGENT_ID)}' AND e.timestamp > '${esc(cutoff)}' RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome, e.timestamp AS ts ORDER BY e.timestamp ASC`),
-      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}' RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp ASC`),
+      await safeQuery(conn, `MATCH (e:Experience) WHERE e.agent = '${esc(AGENT_ID)}' AND e.timestamp > '${esc(cutoff)}' RETURN e.text AS text, e.type AS type, e.outcome AS outcome, e.timestamp AS ts ORDER BY e.timestamp ASC`),
+      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}' RETURN k.text AS text, k.kind AS kind ORDER BY k.timestamp ASC`),
     ]);
     let md = `# ${dateStr}\n\n`;
     if (experiences.length) {
       md += "## Experiences\n";
-      for (const e of experiences) md += `- ${(e.ts || "").slice(11, 16)} ${(e.summary || e.type || "experience").slice(0, 150)}${e.outcome ? ` [${e.outcome}]` : ""}\n`;
+      for (const e of experiences) md += `- ${(e.ts || "").slice(11, 16)} ${(e.text || e.type || "experience").slice(0, 150)}${e.outcome ? ` [${e.outcome}]` : ""}\n`;
       md += "\n";
     }
     if (knowledges.length) {
       md += "## Knowledges\n";
-      for (const k of knowledges) md += `- ${k.kind ? `(${k.kind}) ` : ""}${(k.content || "").slice(0, 150)}\n`;
+      for (const k of knowledges) md += `- ${k.kind ? `(${k.kind}) ` : ""}${(k.text || "").slice(0, 150)}\n`;
       md += "\n";
     }
     if (!experiences.length && !knowledges.length) md += "_No activity today_\n";
@@ -263,7 +263,7 @@ async function runFlush(filePath) {
         entityIdMap[entity.name] = id;
         const metadata = JSON.stringify({ description: entity.description || "", source: graphSource });
         try {
-          const stmt = await conn.prepare("MERGE (e:Entity {id: $id}) SET e.name = $name, e.type = $type, e.metadata = $metadata, e.source = $source");
+          const stmt = await conn.prepare("MERGE (e:Entity {id: $id}) SET e.name = $name, e.text = $name, e.type = $type, e.metadata = $metadata, e.source = $source");
           await conn.execute(stmt, { id, name: entity.name, type: entity.label || "Concept", metadata, source: graphSource });
           const embVec = await embed([entity.name, entity.description || ""].filter(Boolean).join(" "));
           if (embVec) saveEmbedding(id, embVec);
@@ -297,22 +297,23 @@ async function runFlush(filePath) {
 
     try {
       if (isKnowledge) {
+        const text = item.content || item.text || "";
         await conn.query(
           `MERGE (k:Knowledge {id: '${esc(id)}'})
-           SET k.kind = '${esc(item.kind || "fact")}', k.content = '${esc(item.content || "")}',
+           SET k.text = '${esc(text)}', k.kind = '${esc(item.kind || "fact")}',
                k.agent = '${esc(agent)}', k.timestamp = '${esc(ts)}', k.source = '${esc(source)}'`
         );
-        const embVec = await embed(item.content || "");
+        const embVec = await embed(text);
         if (embVec) saveEmbedding(id, embVec);
       } else {
+        const text = item.summary || item.text || "";
         await conn.query(
           `MERGE (x:Experience {id: '${esc(id)}'})
-           SET x.type = '${esc(item.type || "task_run")}', x.agent = '${esc(agent)}',
+           SET x.text = '${esc(text)}', x.type = '${esc(item.type || "task_run")}', x.agent = '${esc(agent)}',
                x.timestamp = '${esc(ts)}', x.outcome = '${esc(item.outcome || "")}',
-               x.summary = '${esc(item.summary || "")}', x.metadata = '${esc(JSON.stringify(item.metadata || {}))}',
-               x.source = '${esc(source)}'`
+               x.metadata = '${esc(JSON.stringify(item.metadata || {}))}', x.source = '${esc(source)}'`
         );
-        const embVec = await embed(item.summary || "");
+        const embVec = await embed(text);
         if (embVec) saveEmbedding(id, embVec);
       }
       nodes++;
@@ -329,7 +330,7 @@ async function runFlush(filePath) {
       const entityId = `entity:${name.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
       try {
         // Upsert entity node
-        const stmt = await conn.prepare("MERGE (e:Entity {id: $id}) SET e.name = $name, e.source = $source");
+        const stmt = await conn.prepare("MERGE (e:Entity {id: $id}) SET e.name = $name, e.text = $name, e.source = $source");
         await conn.execute(stmt, { id: entityId, name, source });
         entities++;
       } catch { /* skip */ }
@@ -343,14 +344,15 @@ async function runFlush(filePath) {
       } catch { /* skip duplicate */ }
     }
 
-    // --- DERIVED edge: knowledge came from an experience ---
+    // --- DERIVED edge: experience produced this knowledge ---
+    // Schema direction: Experience -[DERIVED]-> Knowledge
     if (isKnowledge && item.derives) {
       const derivesList = Array.isArray(item.derives) ? item.derives : [item.derives];
       for (const expId of derivesList) {
         try {
           await conn.query(
             `MATCH (k:Knowledge {id: '${esc(id)}'}), (x:Experience {id: '${esc(expId)}'})
-             MERGE (k)-[:DERIVED {source: '${esc(source)}'}]->(x)`
+             MERGE (x)-[:DERIVED {source: '${esc(source)}'}]->(k)`
           );
           edges++;
         } catch { /* experience may not exist yet */ }
@@ -410,16 +412,16 @@ async function runMaintain() {
 async function exportIndex() {
   try {
     const [knowledges, experiences, entities] = await withDb(true, async (conn) => [
-      await safeQuery(conn, `MATCH (k:Knowledge) RETURN k.id AS id, k.kind AS kind, k.content AS content, k.agent AS agent, k.timestamp AS timestamp ORDER BY k.timestamp DESC`),
-      await safeQuery(conn, `MATCH (e:Experience) RETURN e.id AS id, e.type AS type, e.summary AS summary, e.outcome AS outcome, e.agent AS agent, e.timestamp AS timestamp ORDER BY e.timestamp DESC`),
+      await safeQuery(conn, `MATCH (k:Knowledge) RETURN k.id AS id, k.kind AS kind, k.text AS text, k.agent AS agent, k.timestamp AS timestamp ORDER BY k.timestamp DESC`),
+      await safeQuery(conn, `MATCH (e:Experience) RETURN e.id AS id, e.type AS type, e.text AS text, e.outcome AS outcome, e.agent AS agent, e.timestamp AS timestamp ORDER BY e.timestamp DESC`),
       await safeQuery(conn, `MATCH (e:Entity) RETURN e.id AS id, e.name AS name, e.kind AS kind, e.description AS description, e.source AS source ORDER BY e.id ASC`),
     ]);
     let md = "";
     for (const k of knowledges) {
-      md += `## ${k.id}\nkind: ${k.kind || "fact"}\nagent: ${k.agent || ""}\ncontent: ${k.content || ""}\ntimestamp: ${k.timestamp || ""}\n\n`;
+      md += `## ${k.id}\nkind: ${k.kind || "fact"}\nagent: ${k.agent || ""}\ncontent: ${k.text || ""}\ntimestamp: ${k.timestamp || ""}\n\n`;
     }
     for (const e of experiences) {
-      md += `## ${e.id}\ntype: experience\nagent: ${e.agent || ""}\nsummary: ${e.summary || ""}`;
+      md += `## ${e.id}\ntype: experience\nagent: ${e.agent || ""}\nsummary: ${e.text || ""}`;
       if (e.outcome) md += `\noutcome: ${e.outcome}`;
       md += `\ntimestamp: ${e.timestamp || ""}\n\n`;
     }
@@ -444,9 +446,9 @@ async function runEmbed() {
   const batch = {};
   let count = 0;
   const tables = [
-    { table: "Knowledge", textField: "content" },
-    { table: "Experience", textField: "summary" },
-    { table: "Entity",     textField: "name" },
+    { table: "Knowledge", textField: "text" },
+    { table: "Experience", textField: "text" },
+    { table: "Entity",     textField: "text" },
   ];
   for (const { table, textField } of tables) {
     try {
