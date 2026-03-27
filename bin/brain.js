@@ -51,22 +51,22 @@ if (cmd === "--help" || cmd === "-h" || !cmd) {
 
 Usage:
   brain init [--agent <id>] [--corpus <path>]
-  brain push [--buffer <file>] [--agent <id>] <json>
-  brain push --graph <file> [--agent <id>]
-  brain flush                                 Flush queue.jsonl to graph
-  brain flush --buffer <file>                 Flush a specific buffer file to graph
+  brain push [--buffer <file>] [--agent <id>] <json>    Queue a knowledge/experience item
+  brain push --graph <file> [--agent <id>]               Queue entity/relationship graph
+  brain flush                                            Flush shared queue.jsonl to graph
+  brain flush --buffer <file>                            Flush a specific buffer file to graph
   brain recall [--buffer <file>] [--agent <id>] [--days N] <query>
   brain explore <entity>
   brain get <id>
-  brain consolidate [--agent <id>] [--flags]  Update MEMORY.md sections
+  brain consolidate [--agent <id>] [--flags]             Update MEMORY.md sections
 
 Consolidate flags:
-  --drain       Flush queue.jsonl to graph (alias for: brain flush)
   --focus       Update MEMORY.md focus section
   --recent      Update MEMORY.md recent section
   --permanent   LLM-summarize top knowledge into permanent section
   --daily       Write daily log file
-  --maintain    Prune old experiences, strengthen edges`);
+  --maintain    Prune old experiences, strengthen edges
+  --embed       Backfill vector embeddings for existing nodes`);
   process.exit(0);
 }
 
@@ -144,17 +144,12 @@ switch (cmd) {
 
   case "flush": {
     const { flags } = parseFlags(args);
-    if (flags.buffer) {
-      // Flush a specific buffer file
-      if (!fs.existsSync(flags.buffer)) {
-        console.error("Buffer file not found:", flags.buffer);
-        process.exit(1);
-      }
-      spawnConsolidate(resolveAgentId(flags), "--input", flags.buffer);
-    } else {
-      // Flush the main queue
-      spawnConsolidate(resolveAgentId(flags), "--drain");
+    const inputFile = flags.buffer || QUEUE_PATH;
+    if (flags.buffer && !fs.existsSync(flags.buffer)) {
+      console.error("Buffer file not found:", flags.buffer);
+      process.exit(1);
     }
+    spawnConsolidate(resolveAgentId(flags), "--input", inputFile);
     console.log("OK");
     break;
   }
@@ -319,9 +314,8 @@ switch (cmd) {
   case "consolidate": {
     const { flags: cFlags } = parseFlags(args);
     const consolidateFlags = args.filter(a => a.startsWith("--"));
-    if (consolidateFlags.length === 0) {
-      consolidateFlags.push("--drain", "--focus", "--recent");
-    }
+    // Default: update focus + recent sections
+    if (consolidateFlags.length === 0) consolidateFlags.push("--focus", "--recent");
     spawnConsolidate(resolveAgentId(cFlags), ...consolidateFlags);
     console.log("OK — consolidate spawned with: " + consolidateFlags.join(" "));
     break;
@@ -374,10 +368,10 @@ switch (cmd) {
     console.log(`  config:     ${configPath}`);
     console.log(``);
     console.log(`Next steps:`);
-    console.log(`  1. brain flush                                  # flush any pending queue items`);
-    console.log(`  2. brain consolidate --focus --recent           # update MEMORY.md sections`);
-    console.log(`  3. brain consolidate --embed                    # build vector index`);
-    console.log(`  4. brain recall --agent ${agentId} "test query"  # verify search works`);
+    console.log(`  1. brain flush                          # flush any pending queue items`);
+    console.log(`  2. brain consolidate --agent ${agentId} --focus --recent  # update MEMORY.md`);
+    console.log(`  3. brain consolidate --agent ${agentId} --embed           # build vector index`);
+    console.log(`  4. brain recall --agent ${agentId} "test query"           # verify search works`);
     break;
   }
 

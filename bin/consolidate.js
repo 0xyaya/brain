@@ -73,14 +73,22 @@ const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 const shellEscape = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
 
 // --- Parse CLI flags ---
-const flags = { drain: false, focus: false, recent: false, permanent: false, daily: false, maintain: false, embed: false, input: null };
+// --input <file>  flush a specific file into the graph (queue.jsonl or a buffer file)
+// --focus         update MEMORY.md focus section
+// --recent        update MEMORY.md recent section
+// --permanent     LLM-summarize top knowledge into permanent section
+// --daily         write daily log file
+// --maintain      prune old experiences, strengthen edges
+// --embed         backfill embeddings for existing nodes
+const flags = { focus: false, recent: false, permanent: false, daily: false, maintain: false, embed: false, input: null };
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
   if (a === "--input" && process.argv[i + 1]) flags.input = process.argv[++i];
   else if (a.startsWith("--") && a.slice(2) in flags) flags[a.slice(2)] = true;
 }
-if (!Object.values(flags).some(Boolean)) {
-  flags.drain = flags.focus = flags.recent = true;
+if (!Object.values(flags).some(v => v)) {
+  // Default: update memory sections (flush is explicit via --input)
+  flags.focus = flags.recent = true;
 }
 
 // --- MEMORY.md section management ---
@@ -423,9 +431,9 @@ async function run() {
   acquireLock();
   try {
     if (flags.maintain) await runMaintain();
-    if (flags.drain || flags.input) {
-      await runFlush(flags.input || QUEUE_PATH);
-    } else if (flags.focus || flags.recent || flags.permanent || flags.daily || flags.embed) {
+    if (flags.input) {
+      await runFlush(flags.input);
+    } else {
       // exportIndex is called inside runFlush; call explicitly when flush didn't run
       await exportIndex();
     }
