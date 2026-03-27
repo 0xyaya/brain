@@ -288,14 +288,15 @@ async function runFlush(filePath) {
       continue;
     }
 
-    // --- knowledge / experience: direct write ---
+    // --- knowledge / experience: write node + edges ---
     const id = item.id || `${item.type === "knowledge" ? "know" : "exp"}:${uid()}`;
     const ts = item.timestamp || new Date().toISOString();
     const agent = item.agent || AGENT_ID;
     const source = item.source || `local:${agent}`;
+    const isKnowledge = item.type === "knowledge";
 
     try {
-      if (item.type === "knowledge") {
+      if (isKnowledge) {
         await conn.query(
           `MERGE (k:Knowledge {id: '${esc(id)}'})
            SET k.kind = '${esc(item.kind || "fact")}', k.content = '${esc(item.content || "")}',
@@ -315,7 +316,50 @@ async function runFlush(filePath) {
         if (embVec) saveEmbedding(id, embVec);
       }
       nodes++;
-    } catch (e) { log(`Node write error (${id}): ${e.message}`); }
+    } catch (e) { log(`Node write error (${id}): ${e.message}`); continue; }
+
+    // --- Entity wiring ---
+    // Collect declared entities + always include the agent as an entity
+    const declaredEntities = Array.isArray(item.entities) ? item.entities : [];
+    const allEntityNames = [...new Set([agent, ...declaredEntities])];
+    const nodeTable = isKnowledge ? "Knowledge" : "Experience";
+    const edgeType = isKnowledge ? "ABOUT" : "INVOLVES";
+
+    for (const name of allEntityNames) {
+      const entityId = `entity:${name.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
+      try {
+        // Upsert entity node
+        const stmt = await conn.prepare("MERGE (e:Entity {id: $id}) SET e.name = $name, e.source = $source");
+        await conn.execute(stmt, { id: entityId, name, source });
+        entities++;
+      } catch { /* skip */ }
+      try {
+        // Create edge: node --ABOUT/INVOLVES--> entity
+        await conn.query(
+          `MATCH (n:${nodeTable} {id: '${esc(id)}'}), (e:Entity {id: '${esc(entityId)}'})
+           MERGE (n)-[:${edgeType} {source: '${esc(source)}'}]->(e)`
+        );
+        edges++;
+      } catch { /* skip duplicate */ }
+    }
+
+    // --- DERIVED edge: knowledge came from an experience ---
+    if (isKnowledge && item.derives) {
+      const derivesList = Array.isArray(item.derives) ? item.derives : [item.derives];
+      for (const expId of derivesList) {
+        try {
+          await conn.query(
+            `MATCH (k:Knowledge {id: '${esc(id)}'}), (x:Experience {id: '${esc(expId)}'})
+             MERGE (k)-[:DERIVED {source: '${esc(source)}'}]->(x)`
+          );
+          edges++;
+        } catch { /* experience may not exist yet */ }
+      }
+    }
+
+    if (allEntityNames.length === 0) {
+      log(`Warning: node ${id} has no entity references — isolated node`);
+    }
   }
 
   // Clear input after successful write
