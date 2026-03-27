@@ -269,12 +269,30 @@ switch (cmd) {
     const { getDb, closeDb } = await import("../src/db.js");
     try {
       const conn = await getDb(true);
-      const stmt = await conn.prepare(
-        `MATCH (e:Entity {name: $name})-[r*1..2]-(n) RETURN DISTINCT label(n) AS type, n.id AS id, n.name AS name LIMIT 20`
+      const results = [];
+
+      // Entities connected to this entity
+      const eStmt = await conn.prepare(
+        `MATCH (e:Entity {name: $name})-[r*1..2]-(n:Entity) RETURN DISTINCT n.id AS id, n.name AS name, 'entity' AS type LIMIT 10`
       );
-      const result = await conn.execute(stmt, { name: entity });
-      const rows = await result.getAll();
-      console.log(JSON.stringify(rows));
+      const eRows = await (await conn.execute(eStmt, { name: entity })).getAll();
+      results.push(...eRows);
+
+      // Knowledge nodes ABOUT this entity
+      const kStmt = await conn.prepare(
+        `MATCH (k:Knowledge)-[:ABOUT]->(e:Entity {name: $name}) RETURN k.id AS id, k.content AS name, 'knowledge' AS type LIMIT 10`
+      );
+      const kRows = await (await conn.execute(kStmt, { name: entity })).getAll();
+      results.push(...kRows);
+
+      // Experiences INVOLVING this entity
+      const xStmt = await conn.prepare(
+        `MATCH (x:Experience)-[:INVOLVES]->(e:Entity {name: $name}) RETURN x.id AS id, x.summary AS name, 'experience' AS type LIMIT 10`
+      );
+      const xRows = await (await conn.execute(xStmt, { name: entity })).getAll();
+      results.push(...xRows);
+
+      console.log(JSON.stringify(results));
       await closeDb();
     } catch {
       console.log("[]");
