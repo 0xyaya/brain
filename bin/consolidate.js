@@ -12,7 +12,6 @@ const BRAIN_DIR = process.env.BRAIN_DIR
   ? path.resolve(process.env.BRAIN_DIR)
   : DEFAULT_BRAIN_DIR;
 
-// Load config from brain dir
 function loadConfig() {
   try { return JSON.parse(fs.readFileSync(path.join(BRAIN_DIR, "config.json"), "utf-8")); }
   catch { return {}; }
@@ -35,23 +34,34 @@ function log(msg) {
   console.error(line);
 }
 
+// Atomic lock — openSync('wx') fails with EEXIST if the file already exists,
+// eliminating the TOCTOU race between check and write.
 function acquireLock() {
-  if (fs.existsSync(LOCK_PATH)) {
+  try {
+    const fd = fs.openSync(LOCK_PATH, "wx");
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+    // Lock exists — check if the owning process is still alive
     try {
       const pid = parseInt(fs.readFileSync(LOCK_PATH, "utf-8").trim(), 10);
       if (pid && !isNaN(pid)) {
         try {
-          process.kill(pid, 0); // throws if dead
+          process.kill(pid, 0); // throws ESRCH if dead
           log("consolidate already running (lock exists). Exiting.");
           process.exit(0);
         } catch {
           log(`Stale lock (pid ${pid} dead), removing.`);
         }
       }
-    } catch { /* malformed lock file */ }
+    } catch { /* malformed lock file — fall through to remove */ }
     fs.unlinkSync(LOCK_PATH);
+    // Retry once after removing stale lock
+    const fd = fs.openSync(LOCK_PATH, "wx");
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
   }
-  fs.writeFileSync(LOCK_PATH, String(process.pid));
 }
 
 function releaseLock() {
@@ -74,29 +84,6 @@ if (!Object.values(flags).some(Boolean)) {
 }
 
 // --- MEMORY.md section management ---
-async function upsertMemoryNode(kind, content) {
-  const ts = new Date().toISOString();
-  const memId = `memory:${AGENT_ID}`;
-  const nodeId = `memory:${AGENT_ID}:${kind}`;
-  const edgeType = kind === "permanent" ? "HAS_PERMANENT" : kind === "focus" ? "HAS_FOCUS" : "HAS_RECENT";
-  try {
-    await withDb(false, async (conn) => {
-      // Ensure Entity node exists
-      await safeQuery(conn, `MERGE (e:Entity {id: 'entity:${AGENT_ID}'}) SET e.name = '${AGENT_ID}', e.type = 'agent', e.source = 'local:brain'`);
-      // Ensure Memory root node exists
-      await safeQuery(conn, `MERGE (m:Memory {id: '${memId}'}) SET m.agent = '${AGENT_ID}', m.kind = 'root', m.updated_at = '${ts}'`);
-      // Ensure Entity → HAS_MEMORY → Memory edge
-      await safeQuery(conn, `MATCH (e:Entity {id: 'entity:${AGENT_ID}'}), (m:Memory {id: '${memId}'}) MERGE (e)-[:HAS_MEMORY]->(m)`);
-      // Upsert the specific memory section node
-      const escaped = content.replace(/'/g, "\\'").slice(0, 2000);
-      await safeQuery(conn, `MERGE (n:Memory {id: '${nodeId}'}) SET n.agent = '${AGENT_ID}', n.kind = '${kind}', n.content = '${escaped}', n.updated_at = '${ts}'`);
-      // Ensure Memory root → HAS_<KIND> → section node edge
-      await safeQuery(conn, `MATCH (m:Memory {id: '${memId}'}), (n:Memory {id: '${nodeId}'}) MERGE (m)-[:${edgeType}]->(n)`);
-    });
-    log(`Memory node upserted: ${nodeId}`);
-  } catch (e) { log(`Memory node upsert error (${kind}): ${e.message}`); }
-}
-
 function updateMemorySection(section, content) {
   fs.mkdirSync(path.dirname(MEMORY_MD_PATH), { recursive: true });
   let md = fs.existsSync(MEMORY_MD_PATH) ? fs.readFileSync(MEMORY_MD_PATH, "utf-8") : "";
@@ -108,21 +95,11 @@ function updateMemorySection(section, content) {
 }
 
 // --- DB query helper ---
-// Single shared write connection for the entire consolidate process.
-// LadybugDB caches one connection; we init in write mode so all operations
-// (reads and writes) share it. closeDb() is intentionally never called
-// mid-process — the DB flushes on process exit.
-let _sharedConn = null;
-async function getSharedConn() {
-  if (_sharedConn) return _sharedConn;
-  await initSchema();
-  _sharedConn = await getDb(false); // write mode
-  return _sharedConn;
-}
-
 async function withDb(readOnly, fn) {
-  const conn = await getSharedConn();
-  return fn(conn);
+  await initSchema();
+  const conn = await getDb(readOnly);
+  try { return await fn(conn); }
+  finally { await closeDb(); }
 }
 
 async function safeQuery(conn, sql) {
@@ -130,18 +107,39 @@ async function safeQuery(conn, sql) {
   catch { return []; }
 }
 
+// --- Item validation ---
+// Rejects malformed or binary-corrupted items before they reach the DB.
+function validateItem(item) {
+  if (!item || typeof item !== "object") return false;
+  if (!item.type) return false;
+  if (item.type === "graph_import") return true; // handled separately
+
+  // Validate text fields are readable strings (not binary garbage)
+  const textField = item.type === "knowledge" ? item.content : item.summary;
+  if (textField !== undefined) {
+    if (typeof textField !== "string") return false;
+    if (textField.length > 0) {
+      const printable = [...textField].filter(c => {
+        const code = c.charCodeAt(0);
+        return code >= 32 || c === "\n" || c === "\t" || c === "\r";
+      }).length;
+      if (printable / textField.length < 0.9) return false; // binary garbage
+    }
+  }
+  return true;
+}
+
 // --- Focus ---
 async function runFocus() {
   try {
     const threads = await withDb(true, (conn) =>
-      safeQuery(conn, `MATCH (k:Knowledge {kind: 'thread'}) WHERE k.agent = '${esc(AGENT_ID)}' OR k.agent = '' RETURN k.content AS content, k.timestamp AS ts ORDER BY k.timestamp DESC LIMIT 5`)
+      safeQuery(conn, `MATCH (k:Knowledge {kind: 'thread', agent: '${esc(AGENT_ID)}'}) RETURN k.content AS content, k.timestamp AS ts ORDER BY k.timestamp DESC LIMIT 5`)
     );
     let content = "# Focus\n";
     content += threads.length > 0
       ? threads.map(t => `- ${(t.content || "").slice(0, 120)}`).join("\n") + "\n"
       : "_No open threads_\n";
     updateMemorySection("FOCUS", content);
-    await upsertMemoryNode("focus", content);
     log(`Focus: ${threads.length} threads`);
   } catch (e) { log(`Focus error: ${e.message}`); }
 }
@@ -151,8 +149,8 @@ async function runRecent() {
   try {
     const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
     const [experiences, knowledges] = await withDb(true, async (conn) => [
-      await safeQuery(conn, `MATCH (e:Experience) WHERE e.timestamp > '${esc(cutoff)}' AND (e.agent = '${esc(AGENT_ID)}' OR e.agent = '') RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome ORDER BY e.timestamp DESC LIMIT 5`),
-      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.timestamp > '${esc(cutoff)}' AND k.kind IN ['fact','decision'] AND (k.agent = '${esc(AGENT_ID)}' OR k.agent = '') RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 8`),
+      await safeQuery(conn, `MATCH (e:Experience) WHERE e.agent = '${esc(AGENT_ID)}' AND e.timestamp > '${esc(cutoff)}' RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome ORDER BY e.timestamp DESC LIMIT 5`),
+      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}' AND k.kind IN ['fact','decision'] RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 8`),
     ]);
     let content = "# Recent\n";
     for (const e of experiences) {
@@ -163,7 +161,6 @@ async function runRecent() {
     }
     if (!experiences.length && !knowledges.length) content += "_No recent activity_\n";
     updateMemorySection("RECENT", content);
-    await upsertMemoryNode("recent", content);
     log(`Recent: ${experiences.length} experiences, ${knowledges.length} knowledges`);
   } catch (e) { log(`Recent error: ${e.message}`); }
 }
@@ -172,7 +169,7 @@ async function runRecent() {
 async function runPermanent() {
   try {
     const knowledges = await withDb(true, (conn) =>
-      safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' OR k.agent = '' RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 20`)
+      safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 20`)
     );
     if (!knowledges.length) {
       updateMemorySection("PERMANENT", "# Permanent\n_No knowledge yet_\n");
@@ -189,9 +186,7 @@ async function runPermanent() {
     } catch {
       summary = knowledges.slice(0, 10).map(k => `- (${k.kind || "fact"}) ${(k.content || "").slice(0, 120)}`).join("\n");
     }
-    const permanentContent = `# Permanent\n${summary}\n`;
-    updateMemorySection("PERMANENT", permanentContent);
-    await upsertMemoryNode("permanent", permanentContent);
+    updateMemorySection("PERMANENT", `# Permanent\n${summary}\n`);
     log(`Permanent: summarized ${knowledges.length} knowledges`);
   } catch (e) { log(`Permanent error: ${e.message}`); }
 }
@@ -204,8 +199,8 @@ async function runDaily() {
     const dayStart = new Date(today); dayStart.setHours(0, 0, 0, 0);
     const cutoff = dayStart.toISOString();
     const [experiences, knowledges] = await withDb(true, async (conn) => [
-      await safeQuery(conn, `MATCH (e:Experience) WHERE e.timestamp > '${esc(cutoff)}' AND (e.agent = '${esc(AGENT_ID)}' OR e.agent = '') RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome, e.timestamp AS ts ORDER BY e.timestamp ASC`),
-      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.timestamp > '${esc(cutoff)}' AND (k.agent = '${esc(AGENT_ID)}' OR k.agent = '') RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp ASC`),
+      await safeQuery(conn, `MATCH (e:Experience) WHERE e.agent = '${esc(AGENT_ID)}' AND e.timestamp > '${esc(cutoff)}' RETURN e.summary AS summary, e.type AS type, e.outcome AS outcome, e.timestamp AS ts ORDER BY e.timestamp ASC`),
+      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}' RETURN k.content AS content, k.kind AS kind ORDER BY k.timestamp ASC`),
     ]);
     let md = `# ${dateStr}\n\n`;
     if (experiences.length) {
@@ -226,174 +221,102 @@ async function runDaily() {
   } catch (e) { log(`Daily error: ${e.message}`); }
 }
 
-// --- Drain ---
-async function runDrain() {
-  const filePath = flags.input || QUEUE_PATH;
+// --- Flush ---
+// Reads items from filePath, validates each one, writes directly to Kuzu.
+// No LLM. Agents generate structured JSON at runtime — extraction already happened.
+async function runFlush(filePath) {
   if (!fs.existsSync(filePath)) { log(`No input file: ${filePath}`); return; }
   const raw = fs.readFileSync(filePath, "utf-8").trim();
   if (!raw) { log("Empty input file."); return; }
-  const items = raw.split("\n").map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-  if (!items.length) { log("No valid items."); return; }
-  log(`Processing ${items.length} items (${flags.input ? "input" : "drain"})`);
+
+  const allItems = raw.split("\n").map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  if (!allItems.length) { log("No valid items."); return; }
+
+  const items = allItems.filter(validateItem);
+  const rejected = allItems.length - items.length;
+  if (rejected > 0) log(`Validation: rejected ${rejected} malformed/corrupted items`);
+
+  log(`Flushing ${items.length} items`);
 
   await initSchema();
   const conn = await getDb();
 
-  // Handle graph_import items before LLM extraction
-  const regularItems = [];
+  let nodes = 0, entities = 0, edges = 0;
+
   for (const item of items) {
-    if (item.type === 'graph_import') {
-      const { entities = [], relationships = [] } = item.data || {};
-
-      // Insert Entity nodes
-      for (const entity of entities) {
-        const id = 'entity:' + entity.name.toLowerCase().replace(/[^a-z0-9]/g, '-');
-        const name = entity.name;
-        const type = entity.label || 'Concept';
-        const graphSource = item.source || 'brain-provider';
-        const metadata = JSON.stringify({ description: entity.description || '', source: graphSource });
-        try {
-          const stmt = await conn.prepare('MERGE (e:Entity {id: $id}) SET e.name = $name, e.type = $type, e.metadata = $metadata, e.source = $source');
-          await conn.execute(stmt, { id, name, type, metadata, source: graphSource });
-          const embText = [name, entity.description || ''].filter(Boolean).join(' ');
-          const embVec = await embed(embText);
-          if (embVec) saveEmbedding(id, embVec);
-        } catch (e) { /* skip */ }
-      }
-
-      // Build entity id map for relationship creation
+    // --- graph_import: direct entity/relationship write ---
+    if (item.type === "graph_import") {
+      const { entities: ents = [], relationships = [] } = item.data || {};
       const entityIdMap = {};
-      for (const entity of entities) {
-        entityIdMap[entity.name] = 'entity:' + entity.name.toLowerCase().replace(/[^a-z0-9]/g, '-');
+      const graphSource = item.source || "brain-provider";
+
+      for (const entity of ents) {
+        const id = "entity:" + entity.name.toLowerCase().replace(/[^a-z0-9]/g, "-");
+        entityIdMap[entity.name] = id;
+        const metadata = JSON.stringify({ description: entity.description || "", source: graphSource });
+        try {
+          const stmt = await conn.prepare("MERGE (e:Entity {id: $id}) SET e.name = $name, e.type = $type, e.metadata = $metadata, e.source = $source");
+          await conn.execute(stmt, { id, name: entity.name, type: entity.label || "Concept", metadata, source: graphSource });
+          const embVec = await embed([entity.name, entity.description || ""].filter(Boolean).join(" "));
+          if (embVec) saveEmbedding(id, embVec);
+          entities++;
+        } catch { /* skip duplicate */ }
       }
 
-      // Insert CONNECTS edges
       for (const rel of relationships) {
         const fromId = entityIdMap[rel.from];
         const toId = entityIdMap[rel.to];
         if (!fromId || !toId) continue;
         try {
-          const edgeSource = item.source || 'brain-provider';
           await conn.query(
             `MATCH (a:Entity {id: '${esc(fromId)}'}), (b:Entity {id: '${esc(toId)}'})` +
-            ` CREATE (a)-[:CONNECTS {type: '${esc(rel.type || 'RELATES_TO')}', weight: 1.0, source: '${esc(edgeSource)}'}]->(b)`
+            ` CREATE (a)-[:CONNECTS {type: '${esc(rel.type || "RELATES_TO")}', weight: 1.0, source: '${esc(graphSource)}'}]->(b)`
           );
-        } catch (e) { /* skip duplicate */ }
+          edges++;
+        } catch { /* skip duplicate edge */ }
       }
 
-      log(`Graph import: ${entities.length} entities, ${relationships.length} relationships`);
+      log(`Graph import: ${ents.length} entities, ${relationships.length} relationships`);
       continue;
     }
-    regularItems.push(item);
-  }
 
-  // If only graph imports, skip LLM extraction
-  if (!regularItems.length) {
-    if (!flags.input) fs.writeFileSync(QUEUE_PATH, "");
-    else fs.unlinkSync(flags.input);
-    await closeDb();
-    log("Drain done (graph imports only).");
-    await exportIndex();
-    return;
-  }
+    // --- knowledge / experience: direct write ---
+    const id = item.id || `${item.type === "knowledge" ? "know" : "exp"}:${uid()}`;
+    const ts = item.timestamp || new Date().toISOString();
+    const agent = item.agent || AGENT_ID;
+    const source = item.source || `local:${agent}`;
 
-  const prompt = `You are a knowledge extraction engine. Given raw experience/knowledge items from an agent's session, extract structured data for a knowledge graph.
-
-INPUT ITEMS:
-${JSON.stringify(regularItems, null, 2)}
-
-Extract and return ONLY valid JSON (no markdown, no explanation) with this structure:
-{
-  "entities": [{"name": "string", "type": "agent|project|person|concept|tool"}],
-  "nodes": [
-    {
-      "nodeType": "Experience|Knowledge",
-      "id": "exp:<short-id> or know:<short-id>",
-      "type": "conversation|task_run|dag_step|heartbeat",
-      "kind": "fact|decision|thread",
-      "content": "string (for Knowledge)",
-      "summary": "string (for Experience)",
-      "agent": "string",
-      "outcome": "success|fail|partial",
-      "timestamp": "ISO string"
-    }
-  ],
-  "edges": [
-    {"from": "<node-id>", "to": "<node-id>", "type": "DERIVED|ABOUT|INVOLVES|RELATES_TO|FOLLOWS"}
-  ]
-}
-
-Rules:
-- Every item should produce at least one node
-- Extract entities mentioned (agents, projects, tools, concepts)
-- Create INVOLVES edges from Experience nodes to relevant Entity nodes
-- Create ABOUT edges from Knowledge nodes to relevant Entity nodes
-- Create DERIVED edges from Experience to any Knowledge extracted from it
-- Use the agent field from the input items
-- Generate short unique IDs with prefix (exp: or know: or entity:)`;
-
-  let llmResponse;
-  try {
-    llmResponse = execSync(`echo ${shellEscape(prompt)} | claude --print --permission-mode bypassPermissions`, {
-      encoding: "utf-8", timeout: 120_000, maxBuffer: 1024 * 1024,
-    });
-  } catch (e) {
-    log(`LLM call failed: ${e.message}`);
-  }
-
-  let extracted = llmResponse ? parseLLMResponse(llmResponse) : null;
-  if (!extracted) extracted = fallbackExtract(regularItems);
-
-  for (const entity of extracted.entities || []) {
-    const id = `entity:${entity.name.toLowerCase().replace(/\s+/g, "-")}`;
     try {
-      const stmt = await conn.prepare(`MERGE (e:Entity {id: $id}) SET e.name = $name, e.type = $type, e.metadata = $metadata`);
-      await conn.execute(stmt, { id, name: entity.name, type: entity.type || "concept", metadata: JSON.stringify(entity.metadata || {}) });
-    } catch (e) { log(`Entity upsert error: ${e.message}`); }
-  }
-
-  for (const node of extracted.nodes || []) {
-    const id = node.id || `${node.nodeType || "exp"}:${uid()}`;
-    const ts = node.timestamp || new Date().toISOString();
-    try {
-      const source = node.source || 'local:' + (node.agent || 'unknown');
-      if (node.nodeType === "Knowledge") {
+      if (item.type === "knowledge") {
         await conn.query(
           `MERGE (k:Knowledge {id: '${esc(id)}'})
-           SET k.kind = '${esc(node.kind || "fact")}', k.content = '${esc(node.content || "")}',
-               k.agent = '${esc(node.agent || "")}', k.timestamp = '${esc(ts)}',
-               k.source = '${esc(source)}'`
+           SET k.kind = '${esc(item.kind || "fact")}', k.content = '${esc(item.content || "")}',
+               k.agent = '${esc(agent)}', k.timestamp = '${esc(ts)}', k.source = '${esc(source)}'`
         );
-        const embVec = await embed(node.content || "");
+        const embVec = await embed(item.content || "");
         if (embVec) saveEmbedding(id, embVec);
       } else {
         await conn.query(
           `MERGE (x:Experience {id: '${esc(id)}'})
-           SET x.type = '${esc(node.type || "task_run")}', x.agent = '${esc(node.agent || "")}',
-               x.timestamp = '${esc(ts)}', x.outcome = '${esc(node.outcome || "")}',
-               x.summary = '${esc(node.summary || "")}', x.metadata = '${esc(JSON.stringify(node.metadata || {}))}',
+           SET x.type = '${esc(item.type || "task_run")}', x.agent = '${esc(agent)}',
+               x.timestamp = '${esc(ts)}', x.outcome = '${esc(item.outcome || "")}',
+               x.summary = '${esc(item.summary || "")}', x.metadata = '${esc(JSON.stringify(item.metadata || {}))}',
                x.source = '${esc(source)}'`
         );
-        const embVec = await embed(node.summary || "");
+        const embVec = await embed(item.summary || "");
         if (embVec) saveEmbedding(id, embVec);
       }
-    } catch (e) { log(`Node create error: ${e.message}`); }
+      nodes++;
+    } catch (e) { log(`Node write error (${id}): ${e.message}`); }
   }
 
-  for (const edge of extracted.edges || []) {
-    try {
-      const fromT = inferTable(edge.from), toT = inferTable(edge.to);
-      if (fromT && toT) {
-        await conn.query(`MATCH (a:${fromT} {id: '${esc(edge.from)}'}), (b:${toT} {id: '${esc(edge.to)}'}) CREATE (a)-[:${edge.type}]->(b)`);
-      }
-    } catch { /* edge may exist or nodes missing */ }
-  }
-
-  if (!flags.input) fs.writeFileSync(QUEUE_PATH, "");
-  else fs.unlinkSync(flags.input);
+  // Clear input after successful write
+  const isQueue = filePath === QUEUE_PATH;
+  if (isQueue) fs.writeFileSync(filePath, "");
+  else fs.unlinkSync(filePath);
 
   await closeDb();
-  log(`Drain done. ${(extracted.nodes || []).length} nodes, ${(extracted.edges || []).length} edges, ${(extracted.entities || []).length} entities.`);
+  log(`Flush done. ${nodes} nodes, ${entities} entities, ${edges} edges.`);
 
   await exportIndex();
 }
@@ -404,6 +327,8 @@ async function runMaintain() {
   const conn = await getDb();
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   let pruned = 0, strengthened = 0;
+
+  // Prune old experiences with no derived knowledge
   try {
     const rows = await (await conn.query(
       `MATCH (e:Experience) WHERE e.timestamp < '${esc(cutoff)}' AND NOT EXISTS { MATCH (e)-[:DERIVED]->(:Knowledge) } RETURN e.id AS id`
@@ -412,8 +337,10 @@ async function runMaintain() {
       try { await conn.query(`MATCH (e:Experience {id: '${esc(row.id)}'}) DETACH DELETE e`); pruned++; } catch { /* skip */ }
     }
   } catch (e) { log(`Prune error: ${e.message}`); }
+
+  // Strengthen recently traversed edges
+  // Note: ABOUT crashes LadybugDB (csr_node_group.cpp assertion) — skipped until upstream fix
   const now = new Date().toISOString();
-  // ABOUT crashes LadybugDB (csr_node_group.cpp assertion) — skip until upstream fix
   for (const rel of ["DERIVED", "INVOLVES", "RELATES_TO", "FOLLOWS"]) {
     try {
       await conn.query(`MATCH ()-[r:${rel}]->() SET r.weight = r.weight + 1`);
@@ -422,43 +349,9 @@ async function runMaintain() {
       strengthened += rows[0]?.c || 0;
     } catch (e) { log(`Strengthen ${rel} error: ${e.message}`); }
   }
+
   await closeDb();
   log(`Maintenance done. Pruned ${pruned} stale experiences, strengthened ${strengthened} edges.`);
-}
-
-// --- Helpers ---
-function inferTable(id) {
-  if (id.startsWith("entity:")) return "Entity";
-  if (id.startsWith("know:") || id.startsWith("knowledge:")) return "Knowledge";
-  if (id.startsWith("exp:") || id.startsWith("experience:")) return "Experience";
-  return null;
-}
-
-function parseLLMResponse(text) {
-  const m = text.match(/\{[\s\S]*\}/);
-  if (!m) return null;
-  try { const p = JSON.parse(m[0]); return (p.entities || p.nodes || p.edges) ? p : null; }
-  catch { return null; }
-}
-
-function fallbackExtract(items) {
-  const entities = [], nodes = [], edges = [], seen = new Set();
-  for (const item of items) {
-    const id = `${item.type === "knowledge" ? "know" : "exp"}:${uid()}`;
-    const ts = item.timestamp || new Date().toISOString();
-    const source = item.source || 'local:' + (item.agent || 'unknown');
-    if (item.type === "knowledge") {
-      nodes.push({ nodeType: "Knowledge", id, kind: item.kind || "fact", content: item.content || item.summary || "", agent: item.agent || "", timestamp: ts, source });
-    } else {
-      nodes.push({ nodeType: "Experience", id, type: item.type || "task_run", agent: item.agent || "", outcome: item.outcome || "", summary: item.summary || "", timestamp: ts, metadata: item.metadata || {}, source });
-    }
-    if (item.agent && !seen.has(item.agent)) {
-      seen.add(item.agent);
-      entities.push({ name: item.agent, type: "agent" });
-      edges.push({ from: id, to: `entity:${item.agent.toLowerCase()}`, type: "INVOLVES" });
-    }
-  }
-  return { entities, nodes, edges };
 }
 
 // --- Export index.md ---
@@ -490,7 +383,7 @@ async function exportIndex() {
   } catch (e) { log(`exportIndex error: ${e.message}`); }
 }
 
-// --- Backfill embeddings for existing nodes (stores in embeddings.json) ---
+// --- Backfill embeddings for existing nodes ---
 async function runEmbed() {
   await initSchema();
   const conn = await getDb(true);
@@ -508,7 +401,7 @@ async function runEmbed() {
       const rows = await safeQuery(conn, `MATCH (n:${table}) RETURN n.id AS id, n.${textField} AS text`);
       let tableCount = 0;
       for (const row of rows) {
-        if (!row.text || existing[row.id]) continue; // skip already embedded
+        if (!row.text || existing[row.id]) continue;
         try {
           const vec = await embed(row.text);
           if (!vec) continue;
@@ -530,9 +423,10 @@ async function run() {
   acquireLock();
   try {
     if (flags.maintain) await runMaintain();
-    if (flags.drain || flags.input) await runDrain();
-    else if (flags.maintain || flags.focus || flags.recent || flags.permanent || flags.daily || flags.embed) {
-      // exportIndex is called inside runDrain; call it explicitly when drain didn't run
+    if (flags.drain || flags.input) {
+      await runFlush(flags.input || QUEUE_PATH);
+    } else if (flags.focus || flags.recent || flags.permanent || flags.daily || flags.embed) {
+      // exportIndex is called inside runFlush; call explicitly when flush didn't run
       await exportIndex();
     }
     if (flags.embed) await runEmbed();

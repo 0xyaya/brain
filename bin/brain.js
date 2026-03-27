@@ -2,9 +2,9 @@
 import os from "os";
 import fs from "fs";
 import path from "path";
-import { spawn, execSync } from "child_process";
+import { spawn } from "child_process";
 
-// --- Config resolution (supports custom brainDir + corpusRoot) ---
+// --- Config resolution ---
 const DEFAULT_BRAIN_DIR = path.join(os.homedir(), "corpus", "brain");
 
 function loadConfig(brainDir = DEFAULT_BRAIN_DIR) {
@@ -13,11 +13,9 @@ function loadConfig(brainDir = DEFAULT_BRAIN_DIR) {
   } catch { return {}; }
 }
 
-// Allow BRAIN_DIR override via env or default
 const BRAIN_DIR = process.env.BRAIN_DIR
   ? path.resolve(process.env.BRAIN_DIR)
   : (() => {
-      // Check if a config exists at default location pointing elsewhere
       try {
         const cfg = JSON.parse(fs.readFileSync(path.join(DEFAULT_BRAIN_DIR, "config.json"), "utf-8"));
         if (cfg.brainDir) return path.resolve(cfg.brainDir.replace("~", os.homedir()));
@@ -34,16 +32,14 @@ fs.mkdirSync(BRAIN_DIR, { recursive: true });
 const cmd = process.argv[2];
 const args = process.argv.slice(3);
 
-// Resolve agent ID: --agent flag > BRAIN_AGENT_ID env > config file > prompt user
 function resolveAgentId(flags = {}) {
   if (flags.agent) return flags.agent;
   if (process.env.BRAIN_AGENT_ID) return process.env.BRAIN_AGENT_ID;
   const cfg = loadConfig(BRAIN_DIR);
   if (cfg.agentId) return cfg.agentId;
-  return null; // will be caught where needed
+  return null;
 }
 
-// Resolve corpus root for daily memory logs
 function resolveCorpusRoot(flags = {}) {
   const cfg = loadConfig(BRAIN_DIR);
   const root = process.env.BRAIN_CORPUS_ROOT || cfg.corpusRoot || path.join(os.homedir(), "corpus");
@@ -54,17 +50,18 @@ if (cmd === "--help" || cmd === "-h" || !cmd) {
   console.log(`brain — agent memory CLI
 
 Usage:
-  brain init [--agent <id>] [--corpus <path>]  Set up brain for this machine
-  brain push [--buffer <file>] [--agent <id>] <json>       Push experience/knowledge to queue
-  brain push --graph <file> [--agent <id>]                  Import entity graph from JSON file
-  brain recall [--buffer <file>] [--agent <id>] [--days N] <query>  Search knowledge + daily logs
-  brain explore <entity>                    Graph neighborhood of an entity
-  brain get <id>                            Get full node by ID
-  brain flush --buffer <file>               Flush buffer file via consolidate
-  brain consolidate [--agent <id>] [--flags]  Run consolidate pipeline
+  brain init [--agent <id>] [--corpus <path>]
+  brain push [--buffer <file>] [--agent <id>] <json>
+  brain push --graph <file> [--agent <id>]
+  brain flush                                 Flush queue.jsonl to graph
+  brain flush --buffer <file>                 Flush a specific buffer file to graph
+  brain recall [--buffer <file>] [--agent <id>] [--days N] <query>
+  brain explore <entity>
+  brain get <id>
+  brain consolidate [--agent <id>] [--flags]  Update MEMORY.md sections
 
 Consolidate flags:
-  --drain       Process queue.jsonl (LLM extraction)
+  --drain       Flush queue.jsonl to graph (alias for: brain flush)
   --focus       Update MEMORY.md focus section
   --recent      Update MEMORY.md recent section
   --permanent   LLM-summarize top knowledge into permanent section
@@ -96,24 +93,10 @@ function parseFlags(args) {
   return { flags, rest };
 }
 
-function isConsolidateRunning() {
-  if (!fs.existsSync(LOCK_PATH)) return false;
-  try {
-    const pid = parseInt(fs.readFileSync(LOCK_PATH, "utf-8").trim(), 10);
-    if (pid && !isNaN(pid)) {
-      try { process.kill(pid, 0); return true; } // process alive
-      catch { fs.unlinkSync(LOCK_PATH); return false; } // stale — clear it
-    }
-  } catch { /* malformed lock */ }
-  fs.unlinkSync(LOCK_PATH);
-  return false;
-}
-
-function spawnConsolidate(agentId, ...args) {
-  if (isConsolidateRunning()) return;
+function spawnConsolidate(agentId, ...spawnArgs) {
   const env = { ...process.env };
   if (agentId) env.BRAIN_AGENT_ID = agentId;
-  const child = spawn("node", [path.join(BIN_DIR, "consolidate.js"), ...args], {
+  const child = spawn("node", [path.join(BIN_DIR, "consolidate.js"), ...spawnArgs], {
     detached: true,
     stdio: "ignore",
     env,
@@ -132,49 +115,46 @@ switch (cmd) {
         process.exit(1);
       }
       const data = JSON.parse(fs.readFileSync(flags.graph, "utf-8"));
-      const item = { type: 'graph_import', data, timestamp: new Date().toISOString(), ...(flags.source && { source: flags.source }) };
+      const item = { type: "graph_import", data, timestamp: new Date().toISOString(), ...(flags.source && { source: flags.source }) };
       const target = flags.buffer || QUEUE_PATH;
-      if (flags.buffer) {
-        fs.mkdirSync(path.dirname(flags.buffer), { recursive: true });
-      }
+      if (flags.buffer) fs.mkdirSync(path.dirname(flags.buffer), { recursive: true });
       fs.appendFileSync(target, JSON.stringify(item) + "\n");
-      if (!flags.buffer) {
-        spawnConsolidate(resolveAgentId(flags), "--drain");
-      }
       console.log("OK");
       break;
     }
 
     let json = rest.join(" ");
-
-    // Read from stdin if no JSON arg
-    if (!json) {
-      json = fs.readFileSync(0, "utf-8").trim();
-    }
-
+    if (!json) json = fs.readFileSync(0, "utf-8").trim();
     if (!json) {
       console.error("Usage: brain push [--buffer <file>] [--graph <file>] <json>");
       process.exit(1);
     }
 
-    // Validate JSON
-    try {
-      JSON.parse(json);
-    } catch {
+    try { JSON.parse(json); } catch {
       console.error("Invalid JSON:", json.slice(0, 100));
       process.exit(1);
     }
 
     const target = flags.buffer || QUEUE_PATH;
-    if (flags.buffer) {
-      fs.mkdirSync(path.dirname(flags.buffer), { recursive: true });
-    }
+    if (flags.buffer) fs.mkdirSync(path.dirname(flags.buffer), { recursive: true });
     fs.appendFileSync(target, json + "\n");
+    console.log("OK");
+    break;
+  }
 
-    if (!flags.buffer) {
+  case "flush": {
+    const { flags } = parseFlags(args);
+    if (flags.buffer) {
+      // Flush a specific buffer file
+      if (!fs.existsSync(flags.buffer)) {
+        console.error("Buffer file not found:", flags.buffer);
+        process.exit(1);
+      }
+      spawnConsolidate(resolveAgentId(flags), "--input", flags.buffer);
+    } else {
+      // Flush the main queue
       spawnConsolidate(resolveAgentId(flags), "--drain");
     }
-
     console.log("OK");
     break;
   }
@@ -190,20 +170,14 @@ switch (cmd) {
 
     if (flags.buffer) {
       // Text search over raw buffer file
-      if (!fs.existsSync(flags.buffer)) {
-        console.log("[]");
-        break;
-      }
+      if (!fs.existsSync(flags.buffer)) { console.log("[]"); break; }
       const lines = fs.readFileSync(flags.buffer, "utf-8").trim().split("\n").filter(Boolean);
       const queryLower = query.toLowerCase();
       const matches = [];
       for (const line of lines) {
         try {
           const item = JSON.parse(line);
-          const text = JSON.stringify(item).toLowerCase();
-          if (text.includes(queryLower)) {
-            matches.push(item);
-          }
+          if (JSON.stringify(item).toLowerCase().includes(queryLower)) matches.push(item);
         } catch { /* skip bad lines */ }
       }
       console.log(JSON.stringify(matches.slice(0, 5)));
@@ -219,23 +193,22 @@ switch (cmd) {
           const store = loadEmbeddings();
           const nodeIds = Object.keys(store);
           if (nodeIds.length > 0) {
-            // Score all stored embeddings
-            const scored = nodeIds.map(id => ({
-              id,
-              score: cosine(queryVec, store[id])
-            })).sort((a, b) => b.score - a.score);
+            const scored = nodeIds
+              .map(id => ({ id, score: cosine(queryVec, store[id]) }))
+              .sort((a, b) => b.score - a.score);
 
-            // Fetch node details from DB for top candidates
             const conn = await getDb(true);
+            const recallAgent = flags.agent || resolveAgentId(flags);
             for (const { id, score } of scored.slice(0, 10)) {
               if (score < 0.3) break;
               try {
                 const table = id.startsWith("entity:") ? "Entity"
                   : id.startsWith("know:") ? "Knowledge" : "Experience";
-                // Only query columns that exist per node type
                 let q;
                 if (table === "Knowledge") {
-                  q = `MATCH (n:Knowledge {id: '${id}'}) RETURN n.content AS text, n.kind AS kind, n.agent AS agent`;
+                  q = recallAgent
+                    ? `MATCH (n:Knowledge {id: '${id}'}) WHERE n.agent = '${recallAgent}' RETURN n.content AS text, n.kind AS kind, n.agent AS agent`
+                    : `MATCH (n:Knowledge {id: '${id}'}) RETURN n.content AS text, n.kind AS kind, n.agent AS agent`;
                 } else if (table === "Experience") {
                   q = `MATCH (n:Experience {id: '${id}'}) RETURN n.summary AS text, n.type AS kind, n.agent AS agent`;
                 } else {
@@ -258,11 +231,9 @@ switch (cmd) {
             await closeDb();
           }
         }
-      } catch (e) {
-        // Embedding unavailable — silent fallback
-      }
+      } catch { /* embedding unavailable — silent fallback */ }
 
-      // 2. Keyword search over recent daily memory logs (last N days)
+      // 2. Keyword search over recent daily memory logs
       const days = flags.days ? parseInt(flags.days) : 3;
       const agentId = resolveAgentId(flags);
       const corpusRoot = resolveCorpusRoot(flags);
@@ -300,7 +271,6 @@ switch (cmd) {
       console.error("Usage: brain explore <entity-name>");
       process.exit(1);
     }
-
     const { getDb, closeDb } = await import("../src/db.js");
     try {
       const conn = await getDb(true);
@@ -311,24 +281,9 @@ switch (cmd) {
       const rows = await result.getAll();
       console.log(JSON.stringify(rows));
       await closeDb();
-    } catch (e) {
+    } catch {
       console.log("[]");
     }
-    break;
-  }
-
-  case "flush": {
-    const { flags } = parseFlags(args);
-    if (!flags.buffer) {
-      console.error("Usage: brain flush --buffer <file>");
-      process.exit(1);
-    }
-    if (!fs.existsSync(flags.buffer)) {
-      console.error("Buffer file not found:", flags.buffer);
-      process.exit(1);
-    }
-    spawnConsolidate(resolveAgentId(flags), "--input", flags.buffer);
-    console.log("OK");
     break;
   }
 
@@ -338,12 +293,10 @@ switch (cmd) {
       console.error("Usage: brain get <id>");
       process.exit(1);
     }
-
     const { getDb, closeDb } = await import("../src/db.js");
     try {
       const conn = await getDb(true);
-      // Try each node type
-      for (const table of ["Experience", "Knowledge", "Entity", "Memory"]) {
+      for (const table of ["Experience", "Knowledge", "Entity"]) {
         try {
           const stmt = await conn.prepare(`MATCH (n:${table} {id: $id}) RETURN n.*`);
           const result = await conn.execute(stmt, { id });
@@ -386,20 +339,15 @@ switch (cmd) {
       process.exit(1);
     }
 
-    // Create directory structure
-    const brainDir = BRAIN_DIR;
     const memoryDir = path.join(corpusRoot, "users", agentId, "memory");
     const userDir = path.join(corpusRoot, "users", agentId);
-    fs.mkdirSync(brainDir, { recursive: true });
+    fs.mkdirSync(BRAIN_DIR, { recursive: true });
     fs.mkdirSync(memoryDir, { recursive: true });
 
-    // Write config.json
-    const configPath = path.join(brainDir, "config.json");
-    const existingConfig = loadConfig(brainDir);
-    const config = { ...existingConfig, agentId, corpusRoot };
+    const configPath = path.join(BRAIN_DIR, "config.json");
+    const config = { ...loadConfig(BRAIN_DIR), agentId, corpusRoot };
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 
-    // Create MEMORY.md if missing
     const memoryMdPath = path.join(userDir, "MEMORY.md");
     if (!fs.existsSync(memoryMdPath)) {
       fs.writeFileSync(memoryMdPath, `# MEMORY.md — Long-term Memory
@@ -419,37 +367,17 @@ switch (cmd) {
       console.log(`  created ${memoryMdPath}`);
     }
 
-    // Seed Entity + Memory graph nodes
-    try {
-      const { initSchema, getDb } = await import("../src/db.js");
-      await initSchema();
-      const db = await getDb();
-      const ts = new Date().toISOString();
-      const memId = `memory:${agentId}`;
-      await db.query(`MERGE (e:Entity {id: 'entity:${agentId}'}) SET e.name = '${agentId}', e.type = 'agent', e.source = 'local:brain', e.created_at = '${ts}'`);
-      await db.query(`MERGE (m:Memory {id: '${memId}'}) SET m.agent = '${agentId}', m.kind = 'root', m.content = '', m.updated_at = '${ts}'`);
-      await db.query(`MERGE (p:Memory {id: 'memory:${agentId}:permanent'}) SET p.agent = '${agentId}', p.kind = 'permanent', p.content = '', p.updated_at = '${ts}'`);
-      await db.query(`MERGE (f:Memory {id: 'memory:${agentId}:focus'}) SET f.agent = '${agentId}', f.kind = 'focus', f.content = '', f.updated_at = '${ts}'`);
-      await db.query(`MERGE (r:Memory {id: 'memory:${agentId}:recent'}) SET r.agent = '${agentId}', r.kind = 'recent', r.content = '', r.updated_at = '${ts}'`);
-      await db.query(`MATCH (e:Entity {id: 'entity:${agentId}'}), (m:Memory {id: '${memId}'}) MERGE (e)-[:HAS_MEMORY]->(m)`);
-      await db.query(`MATCH (m:Memory {id: '${memId}'}), (p:Memory {id: 'memory:${agentId}:permanent'}) MERGE (m)-[:HAS_PERMANENT]->(p)`);
-      await db.query(`MATCH (m:Memory {id: '${memId}'}), (f:Memory {id: 'memory:${agentId}:focus'}) MERGE (m)-[:HAS_FOCUS]->(f)`);
-      await db.query(`MATCH (m:Memory {id: '${memId}'}), (r:Memory {id: 'memory:${agentId}:recent'}) MERGE (m)-[:HAS_RECENT]->(r)`);
-      console.log(`  seeded graph: Entity:${agentId} → Memory → permanent/focus/recent`);
-    } catch (e) {
-      console.warn(`  warning: graph seed failed (${e.message}) — run 'brain consolidate --focus --recent' to populate`);
-    }
-
     console.log(`✓ Brain initialized`);
     console.log(`  agent:      ${agentId}`);
-    console.log(`  brain DB:   ${brainDir}`);
+    console.log(`  brain DB:   ${BRAIN_DIR}`);
     console.log(`  memory:     ${memoryDir}`);
     console.log(`  config:     ${configPath}`);
     console.log(``);
     console.log(`Next steps:`);
-    console.log(`  1. brain consolidate --drain --focus --recent   # first consolidation`);
-    console.log(`  2. brain consolidate --embed                    # build vector index (~25MB model download)`);
-    console.log(`  3. brain recall --agent ${agentId} "test query"  # verify search works`);
+    console.log(`  1. brain flush                                  # flush any pending queue items`);
+    console.log(`  2. brain consolidate --focus --recent           # update MEMORY.md sections`);
+    console.log(`  3. brain consolidate --embed                    # build vector index`);
+    console.log(`  4. brain recall --agent ${agentId} "test query"  # verify search works`);
     break;
   }
 
