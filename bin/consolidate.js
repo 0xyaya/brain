@@ -91,14 +91,39 @@ if (!Object.values(flags).some(v => v)) {
   flags.focus = flags.recent = true;
 }
 
-// --- MEMORY.md section management ---
-function updateMemorySection(section, content) {
+// --- MEMORY.md management ---
+// Sections are stored in memory so each runX() can contribute its part,
+// then writeMemory() builds and writes the full file at the end of the run.
+const _memorySections = {};
+
+function setMemorySection(section, content) {
+  _memorySections[section] = content;
+}
+
+function writeMemory() {
   fs.mkdirSync(path.dirname(MEMORY_MD_PATH), { recursive: true });
-  let md = fs.existsSync(MEMORY_MD_PATH) ? fs.readFileSync(MEMORY_MD_PATH, "utf-8") : "";
-  const start = `<!-- BRAIN:${section}:START -->`, end = `<!-- BRAIN:${section}:END -->`;
-  const block = `${start}\n${content}\n${end}`;
-  const si = md.indexOf(start), ei = md.indexOf(end);
-  md = (si !== -1 && ei !== -1) ? md.slice(0, si) + block + md.slice(ei + end.length) : md.trimEnd() + "\n\n" + block + "\n";
+
+  // Load existing sections not updated this run
+  // Supports both old marker format and new plain format
+  const existing = {};
+  if (fs.existsSync(MEMORY_MD_PATH)) {
+    const raw = fs.readFileSync(MEMORY_MD_PATH, "utf-8");
+    for (const s of ["FOCUS", "RECENT", "PERMANENT"]) {
+      // Try old HTML comment marker format first
+      const markerMatch = raw.match(new RegExp(`<!-- BRAIN:${s}:START -->([\\s\\S]*?)<!-- BRAIN:${s}:END -->`));
+      if (markerMatch) { existing[s] = markerMatch[1].trim(); continue; }
+      // Try new plain format: section starts with "# Focus/Recent/Permanent"
+      const label = s[0] + s.slice(1).toLowerCase();
+      const plainMatch = raw.match(new RegExp(`(# ${label}[\\s\\S]*?)(?=\\n# [A-Z]|$)`));
+      if (plainMatch) existing[s] = plainMatch[1].trim();
+    }
+  }
+
+  const merged = { ...existing, ..._memorySections };
+  const order = ["FOCUS", "RECENT", "PERMANENT"];
+  const md = "# MEMORY.md — Long-term Memory\n\n" +
+    order.filter(s => merged[s]).map(s => merged[s]).join("\n\n") + "\n";
+
   fs.writeFileSync(MEMORY_MD_PATH, md);
 }
 
@@ -147,7 +172,7 @@ async function runFocus() {
     content += threads.length > 0
       ? threads.map(t => `- ${(t.text || "").slice(0, 120)}`).join("\n") + "\n"
       : "_No open threads_\n";
-    updateMemorySection("FOCUS", content);
+    setMemorySection("FOCUS", content);
     log(`Focus: ${threads.length} threads`);
   } catch (e) { log(`Focus error: ${e.message}`); }
 }
@@ -168,7 +193,7 @@ async function runRecent() {
       content += `- ${k.kind ? `(${k.kind}) ` : ""}${(k.text || "").slice(0, 100)}\n`;
     }
     if (!experiences.length && !knowledges.length) content += "_No recent activity_\n";
-    updateMemorySection("RECENT", content);
+    setMemorySection("RECENT", content);
     log(`Recent: ${experiences.length} experiences, ${knowledges.length} knowledges`);
   } catch (e) { log(`Recent error: ${e.message}`); }
 }
@@ -180,7 +205,7 @@ async function runPermanent() {
       safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' RETURN k.text AS text, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 20`)
     );
     if (!knowledges.length) {
-      updateMemorySection("PERMANENT", "# Permanent\n_No knowledge yet_\n");
+      setMemorySection("PERMANENT", "# Permanent\n_No knowledge yet_\n");
       log("Permanent: no knowledges to summarize");
       return;
     }
@@ -194,7 +219,7 @@ async function runPermanent() {
     } catch {
       summary = knowledges.slice(0, 10).map(k => `- (${k.kind || "fact"}) ${(k.content || "").slice(0, 120)}`).join("\n");
     }
-    updateMemorySection("PERMANENT", `# Permanent\n${summary}\n`);
+    setMemorySection("PERMANENT", `# Permanent\n${summary}\n`);
     log(`Permanent: summarized ${knowledges.length} knowledges`);
   } catch (e) { log(`Permanent error: ${e.message}`); }
 }
@@ -488,6 +513,8 @@ async function run() {
     if (flags.recent) await runRecent();
     if (flags.permanent) await runPermanent();
     if (flags.daily) await runDaily();
+    // Write MEMORY.md once at the end — full file, no markers
+    if (flags.focus || flags.recent || flags.permanent) { writeMemory(); log("writeMemory: done"); }
     log("consolidate complete.");
   } finally { releaseLock(); }
 }
