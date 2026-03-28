@@ -630,7 +630,7 @@ ${content.slice(0, 6000)}`;
   }
 }
 
-async function runIngest(memoryDir, threshold = 0.85) {
+async function runIngest(memoryDir, threshold = 0.82) {
   const files = fs.readdirSync(memoryDir)
     .filter(f => /^\d{4}-\d{2}-\d{2}.*\.md$/.test(f))
     .sort();

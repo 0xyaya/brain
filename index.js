@@ -69,7 +69,7 @@ export default function register(api) {
       try {
         const out = execSync(
           `node ${BIN_DIR}/brain.js recall --agent ${shellEscape(agentId)} ${daysFlag} ${shellEscape(params.query)}`,
-          { encoding: "utf-8", timeout: 15_000, env: { ...process.env, BRAIN_AGENT_ID: agentId } }
+          { encoding: "utf-8", timeout: 45_000, env: { ...process.env, BRAIN_AGENT_ID: agentId } }
         );
         return { content: [{ type: "text", text: out.trim() || "[]" }] };
       } catch (e) {
