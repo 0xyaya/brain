@@ -666,19 +666,29 @@ async function runMaintain() {
     if (embChanged) saveEmbeddings(store);
   } catch (e) { log(`Orphan purge error: ${e.message}`); }
 
-  // Strengthen recently traversed edges
-  // Note: ABOUT crashes LadybugDB (csr_node_group.cpp assertion) — skipped until upstream fix
-  const now = new Date().toISOString();
-  for (const rel of ["DERIVED", "INVOLVES", "RELATES_TO", "FOLLOWS"]) {
+  // Decay ALL edge weights over time (use-it-or-lose-it)
+  // Recall path already strengthens traversed edges (+0.1, cap 5.0)
+  // Here we apply global decay so unused connections weaken naturally
+  // λ = 0.05/week → half-life ~14 weeks for an edge with no recalls
+  const DECAY_FACTOR = 0.95;
+  const MIN_WEIGHT = 0.1;
+  let decayed = 0;
+  // Note: DERIVED and RELATES_TO trigger LadybugDB csr_node_group assertion — skipped
+  for (const rel of ["ABOUT", "INVOLVES", "CONNECTS", "FOLLOWS"]) {
     try {
-      await conn.query(`MATCH ()-[r:${rel}]->() SET r.weight = r.weight + 1`);
+      await conn.query(
+        `MATCH ()-[r:${rel}]->()
+         SET r.weight = CASE WHEN r.weight * ${DECAY_FACTOR} > ${MIN_WEIGHT}
+                             THEN r.weight * ${DECAY_FACTOR}
+                             ELSE ${MIN_WEIGHT} END`
+      );
       const rows = await (await conn.query(`MATCH ()-[r:${rel}]->() RETURN count(r) AS c`)).getAll();
-      strengthened += rows[0]?.c || 0;
-    } catch (e) { log(`Strengthen ${rel} error: ${e.message}`); }
+      decayed += rows[0]?.c || 0;
+    } catch (e) { log(`Decay ${rel} error: ${e.message}`); }
   }
 
   await closeDb();
-  log(`Maintenance done. Pruned ${pruned} stale experiences, deleted ${orphansDeleted} isolated nodes, strengthened ${strengthened} edges.`);
+  log(`Maintenance done. Pruned ${pruned} stale experiences, deleted ${orphansDeleted} isolated nodes, decayed ${decayed} edges (×${DECAY_FACTOR}).`);
 }
 
 // --- Export index.md ---
