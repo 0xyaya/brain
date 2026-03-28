@@ -171,32 +171,69 @@ const FOCUS_LAMBDA = 0.05;
 
 async function runFocus() {
   try {
+    // Fetch all threads (open + closed) with their entity connections and centrality.
+    // A thread is OPEN if kind IN ['thread','topic'].
+    // A thread is CLOSED if kind = 'thread_closed'.
+    // Strategy: group by entity → per entity, find most recent thread.
+    // An open thread is superseded if ANY of its entities has a more recent thread_closed node.
+    // Remaining open threads are scored by centrality × exp(-days × λ) and top 5 shown.
     const rows = await withDb(true, (conn) =>
       safeQuery(conn, `
-        MATCH (k:Knowledge)
-        WHERE k.agent = '${esc(AGENT_ID)}' AND k.kind IN ['thread', 'topic']
-        OPTIONAL MATCH (k)-[r1]-(:Entity)
-        OPTIONAL MATCH (k)-[r2]-(:Knowledge)
-        WITH k, COALESCE(SUM(r1.weight), 0) + COALESCE(SUM(r2.weight), 0) + 1 AS centrality
-        RETURN k.id AS id, k.text AS text, k.timestamp AS ts, centrality
+        MATCH (k:Knowledge)-[:ABOUT]->(e:Entity)
+        WHERE k.agent = '${esc(AGENT_ID)}' AND k.kind IN ['thread', 'topic', 'thread_closed']
+        OPTIONAL MATCH (k)-[r]-(:Entity)
+        WITH k, e, COALESCE(SUM(r.weight), 0) + 1 AS centrality
+        RETURN k.id AS id, k.text AS text, k.timestamp AS ts, k.kind AS kind,
+               e.id AS entityId, centrality
       `)
     );
+
+    // Build per-thread info and per-entity latest maps
+    const threadInfo = new Map();   // threadId → {id, text, ts, kind, centrality}
+    const threadEntities = new Map(); // threadId → Set<entityId>
+    const entityLatest = new Map();  // entityId → {ts, kind}
+
+    for (const r of rows) {
+      if (!threadInfo.has(r.id)) {
+        threadInfo.set(r.id, { id: r.id, text: r.text, ts: r.ts, kind: r.kind, centrality: r.centrality });
+      }
+      if (!threadEntities.has(r.id)) threadEntities.set(r.id, new Set());
+      threadEntities.get(r.id).add(r.entityId);
+
+      const prev = entityLatest.get(r.entityId);
+      if (!prev || r.ts > prev.ts) entityLatest.set(r.entityId, { ts: r.ts, kind: r.kind });
+    }
+
+    // Filter: keep open threads not superseded by a newer thread_closed on any shared entity.
+    // Exclude the agent entity (too broad — every node shares it) and require at least 2
+    // topic entities to match before considering a thread superseded.
+    const agentEntityId = `entity:${AGENT_ID.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
     const now = Date.now();
-    const scored = rows
-      .map(r => {
-        const days = (now - new Date(r.ts || now).getTime()) / 86400000;
-        const score = r.centrality * Math.exp(-days * FOCUS_LAMBDA);
-        return { id: r.id, text: r.text, score };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 5);
+    const scored = [];
+    for (const [threadId, info] of threadInfo) {
+      if (info.kind === 'thread_closed') continue;
+      const entities = [...(threadEntities.get(threadId) || new Set())]
+        .filter(eid => eid !== agentEntityId); // exclude agent entity
+      const supersededCount = entities.filter(eid => {
+        const latest = entityLatest.get(eid);
+        return latest && latest.kind === 'thread_closed' && latest.ts > info.ts;
+      }).length;
+      // Require majority of topic entities to be superseded (at least 1, and > 50% of non-agent entities)
+      const superseded = entities.length > 0 && supersededCount >= Math.max(1, Math.ceil(entities.length * 0.5));
+      if (superseded) continue;
+      const days = (now - new Date(info.ts || now).getTime()) / 86400000;
+      scored.push({ text: info.text, score: info.centrality * Math.exp(-days * FOCUS_LAMBDA) });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.slice(0, 5);
 
     let content = "# Focus\n";
-    content += scored.length > 0
-      ? scored.map(t => `- [${t.id}] ${(t.text || "").slice(0, 110)}`).join("\n") + "\n"
+    content += top.length > 0
+      ? top.map(t => `- ${(t.text || "").slice(0, 120)}`).join("\n") + "\n"
       : "_No open threads_\n";
     setMemorySection("FOCUS", content);
-    log(`Focus: ${scored.length} threads (weighted centrality × decay)`);
+    log(`Focus: ${top.length} open threads (entity-grouped, superseded closed, centrality × decay)`);
   } catch (e) { log(`Focus error: ${e.message}`); }
 }
 
