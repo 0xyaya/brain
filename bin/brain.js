@@ -332,6 +332,17 @@ switch (cmd) {
     break;
   }
 
+  case "ingest": {
+    const { flags: iFlags } = parseFlags(args);
+    const agentId = resolveAgentId(iFlags);
+    const ingestArgs = ["--ingest"];
+    if (iFlags.dir) ingestArgs.push("--ingest-dir", path.resolve(iFlags.dir.replace("~", os.homedir())));
+    if (iFlags.threshold) ingestArgs.push("--threshold", iFlags.threshold);
+    spawnConsolidate(agentId, ...ingestArgs);
+    console.log(`OK — ingest spawned for agent: ${agentId}`);
+    break;
+  }
+
   case "init": {
     const { flags: initFlags } = parseFlags(args);
     const agentId = initFlags.agent || process.env.BRAIN_AGENT_ID;
