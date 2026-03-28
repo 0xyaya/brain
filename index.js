@@ -89,8 +89,7 @@ export default function register(api) {
       properties: {
         type: { type: "string", enum: ["knowledge", "experience"], description: "knowledge = fact, decision, or ongoing concern. experience = task or event that happened." },
         text: { type: "string", description: "Free-form text — what happened, was learned, or is being tracked. Write clearly and specifically." },
-        entities: { type: "array", items: { type: "string" }, description: "Entity names this node concerns — creates graph edges. Use real names: people, projects, systems (e.g. ['kuzu','brain','yann'])." },
-        tags: { type: "array", items: { type: "string" }, description: "Optional labels (e.g. ['risk','open','resolved','decision','success']). Use when classification adds value beyond the text." },
+        entities: { type: "array", items: { type: "string" }, description: "Everything this node is about — real entities AND classification words. Mix freely: ['brain','kuzu','decision','risk'] or ['yann','autoresearch','open']. Each becomes an Entity node with a graph edge, so classification words like 'decision', 'risk', 'open', 'resolved', 'success' become traversable axes of the graph." },
         derives: { type: "array", items: { type: "string" }, description: "For knowledge: IDs of experience nodes this was derived from (creates DERIVED edges)." },
       },
       required: ["type", "text"],

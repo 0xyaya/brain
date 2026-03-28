@@ -205,12 +205,19 @@ async function runFocus() {
     // For each entity: use its most recent knowledge node.
     // Score = centrality × exp(-days × λ). Skip if tagged 'resolved'.
     const agentEntityId = `entity:${AGENT_ID.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
+    // Meta-label entities: classification words, not real topics — exclude from per-entity FOCUS scoring
+    // They still contribute to node centrality (edges count), just don't drive FOCUS themselves
+    const META_LABELS = new Set([
+      "decision","risk","open","resolved","success","fail","partial","fact",
+      "summary","architecture","thread","update","note","question","blocker",
+    ]);
     const now = Date.now();
     const seen = new Set(); // deduplicate nodes shown via multiple entities
     const scored = [];
     for (const [entityId, latest] of entityLatest) {
       if (entityId === agentEntityId) continue; // too broad
-      if ((latest.tags || []).includes('resolved')) continue;
+      const entityName = entityId.replace(/^entity:/, "");
+      if (META_LABELS.has(entityName)) continue; // classification word, not a topic
       if (seen.has(latest.nodeId)) continue;
       seen.add(latest.nodeId);
       const info = threadInfo.get(latest.nodeId);
