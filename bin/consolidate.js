@@ -80,7 +80,7 @@ const shellEscape = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
 // --daily         write daily log file
 // --maintain      prune old experiences, strengthen edges
 // --embed         backfill embeddings for existing nodes
-const flags = { focus: false, recent: false, permanent: false, daily: false, maintain: false, embed: false, input: null, ingest: false, ingestDir: null, threshold: null };
+const flags = { focus: false, recent: false, permanent: false, summarize: false, daily: false, maintain: false, embed: false, input: null, ingest: false, ingestDir: null, threshold: null };
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
   if (a === "--input" && process.argv[i + 1]) flags.input = process.argv[++i];
@@ -171,56 +171,50 @@ const FOCUS_LAMBDA = 0.05;
 
 async function runFocus() {
   try {
-    // Fetch all threads (open + closed) with their entity connections and centrality.
-    // A thread is OPEN if kind IN ['thread','topic'].
-    // A thread is CLOSED if kind = 'thread_closed'.
-    // Strategy: group by entity → per entity, find most recent thread.
-    // An open thread is superseded if ANY of its entities has a more recent thread_closed node.
-    // Remaining open threads are scored by centrality × exp(-days × λ) and top 5 shown.
+    // Strategy: group all Knowledge nodes by entity.
+    // Per entity: show the most recent knowledge node (tags tell us current state).
+    // Score entities by centrality × decay, show top 5.
+    // Hide nodes explicitly tagged 'resolved'.
     const rows = await withDb(true, (conn) =>
       safeQuery(conn, `
         MATCH (k:Knowledge)-[:ABOUT]->(e:Entity)
-        WHERE k.agent = '${esc(AGENT_ID)}' AND k.kind IN ['thread', 'topic', 'thread_closed']
+        WHERE k.agent = '${esc(AGENT_ID)}'
         OPTIONAL MATCH (k)-[r]-(:Entity)
         WITH k, e, COALESCE(SUM(r.weight), 0) + 1 AS centrality
-        RETURN k.id AS id, k.text AS text, k.timestamp AS ts, k.kind AS kind,
+        RETURN k.id AS id, k.text AS text, k.timestamp AS ts, k.tags AS tags,
                e.id AS entityId, centrality
       `)
     );
 
-    // Build per-thread info and per-entity latest maps
-    const threadInfo = new Map();   // threadId → {id, text, ts, kind, centrality}
-    const threadEntities = new Map(); // threadId → Set<entityId>
-    const entityLatest = new Map();  // entityId → {ts, kind}
+    // Build per-entity → most recent knowledge map
+    const threadInfo = new Map();   // nodeId → {id, text, ts, tags, centrality}
+    const threadEntities = new Map(); // nodeId → Set<entityId>
+    const entityLatest = new Map();  // entityId → {ts, tags, nodeId}
 
     for (const r of rows) {
       if (!threadInfo.has(r.id)) {
-        threadInfo.set(r.id, { id: r.id, text: r.text, ts: r.ts, kind: r.kind, centrality: r.centrality });
+        threadInfo.set(r.id, { id: r.id, text: r.text, ts: r.ts, tags: r.tags || [], centrality: r.centrality });
       }
       if (!threadEntities.has(r.id)) threadEntities.set(r.id, new Set());
       threadEntities.get(r.id).add(r.entityId);
 
       const prev = entityLatest.get(r.entityId);
-      if (!prev || r.ts > prev.ts) entityLatest.set(r.entityId, { ts: r.ts, kind: r.kind });
+      if (!prev || r.ts > prev.ts) entityLatest.set(r.entityId, { ts: r.ts, tags: r.tags || [], nodeId: r.id });
     }
 
-    // Filter: keep open threads not superseded by a newer thread_closed on any shared entity.
-    // Exclude the agent entity (too broad — every node shares it) and require at least 2
-    // topic entities to match before considering a thread superseded.
+    // For each entity: use its most recent knowledge node.
+    // Score = centrality × exp(-days × λ). Skip if tagged 'resolved'.
     const agentEntityId = `entity:${AGENT_ID.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
     const now = Date.now();
+    const seen = new Set(); // deduplicate nodes shown via multiple entities
     const scored = [];
-    for (const [threadId, info] of threadInfo) {
-      if (info.kind === 'thread_closed') continue;
-      const entities = [...(threadEntities.get(threadId) || new Set())]
-        .filter(eid => eid !== agentEntityId); // exclude agent entity
-      const supersededCount = entities.filter(eid => {
-        const latest = entityLatest.get(eid);
-        return latest && latest.kind === 'thread_closed' && latest.ts > info.ts;
-      }).length;
-      // Require majority of topic entities to be superseded (at least 1, and > 50% of non-agent entities)
-      const superseded = entities.length > 0 && supersededCount >= Math.max(1, Math.ceil(entities.length * 0.5));
-      if (superseded) continue;
+    for (const [entityId, latest] of entityLatest) {
+      if (entityId === agentEntityId) continue; // too broad
+      if ((latest.tags || []).includes('resolved')) continue;
+      if (seen.has(latest.nodeId)) continue;
+      seen.add(latest.nodeId);
+      const info = threadInfo.get(latest.nodeId);
+      if (!info) continue;
       const days = (now - new Date(info.ts || now).getTime()) / 86400000;
       scored.push({ text: info.text, score: info.centrality * Math.exp(-days * FOCUS_LAMBDA) });
     }
@@ -228,13 +222,107 @@ async function runFocus() {
     scored.sort((a, b) => b.score - a.score);
     const top = scored.slice(0, 5);
 
+    // Fetch entity summaries for the top nodes
+    const topNodeIds = new Set(top.map(t => t.id));
+    const summaryMap = new Map(); // entityId → summary text
+    if (top.length > 0) {
+      const entityIds = [];
+      for (const [nodeId, entities] of threadEntities) {
+        if (!topNodeIds.has(nodeId)) continue;
+        for (const eid of entities) { if (eid !== agentEntityId) entityIds.push(eid); }
+      }
+      if (entityIds.length) {
+        const summaries = await withDb(true, (conn) =>
+          safeQuery(conn, `
+            MATCH (s:Summary)-[:SUMMARIZES]->(e:Entity)
+            WHERE e.id IN [${entityIds.map(id => `'${esc(id)}'`).join(",")}]
+              AND s.agent = '${esc(AGENT_ID)}'
+            RETURN e.id AS entityId, s.text AS summary
+          `)
+        );
+        for (const r of summaries) summaryMap.set(r.entityId, r.summary);
+      }
+    }
+
     let content = "# Focus\n";
-    content += top.length > 0
-      ? top.map(t => `- ${(t.text || "").slice(0, 120)}`).join("\n") + "\n"
-      : "_No open threads_\n";
+    if (top.length > 0) {
+      for (const t of top) {
+        const entities = [...(threadEntities.get(t.id) || [])].filter(e => e !== agentEntityId);
+        const summary = entities.map(e => summaryMap.get(e)).find(Boolean);
+        content += `- ${(t.text || "").slice(0, 120)}\n`;
+        if (summary) content += `  → ${summary.slice(0, 120)}\n`;
+      }
+    } else {
+      content += "_No open threads_\n";
+    }
     setMemorySection("FOCUS", content);
-    log(`Focus: ${top.length} open threads (entity-grouped, superseded closed, centrality × decay)`);
+    log(`Focus: ${top.length} nodes (entity-grouped, tag-filtered, centrality × decay)`);
   } catch (e) { log(`Focus error: ${e.message}`); }
+}
+
+// --- Summarize ---
+// Per high-centrality entity: gather all thread/thread_update/thread_closed nodes
+// ordered by timestamp, LLM synthesizes current state → writes/updates Summary node.
+// Fires on 6h cron alongside runPermanent.
+async function runSummarize() {
+  try {
+    // One read pass: get all thread-family nodes grouped by entity
+    const rows = await withDb(true, (conn) =>
+      safeQuery(conn, `
+        MATCH (k:Knowledge)-[:ABOUT]->(e:Entity)
+        WHERE k.agent = '${esc(AGENT_ID)}' AND k.kind IN ['thread', 'topic', 'thread_update', 'thread_closed']
+        RETURN e.id AS entityId, e.name AS entityName,
+               k.text AS text, k.kind AS kind, k.timestamp AS ts
+        ORDER BY e.id ASC, k.timestamp ASC
+      `)
+    );
+
+    if (!rows.length) { log("Summarize: no thread entities found"); return; }
+
+    // Group by entity
+    const byEntity = new Map();
+    for (const r of rows) {
+      if (!byEntity.has(r.entityId)) byEntity.set(r.entityId, { name: r.entityName, leaves: [] });
+      byEntity.get(r.entityId).leaves.push(r);
+    }
+
+    // LLM pass: build summaries (outside DB connection)
+    const summaries = [];
+    for (const [entityId, { name, leaves }] of byEntity) {
+      const history = leaves.map(l =>
+        `[${(l.ts || "").slice(0, 10)} ${l.kind}] ${(l.text || "").slice(0, 160)}`
+      ).join("\n");
+      const prompt = `Summarize the current state of this topic for an AI agent memory.\n\nEntity: ${name}\nTimeline (oldest→newest):\n${history}\n\nOne sentence (max 120 chars), current state only — what changed or remains open. No preamble:`;
+      try {
+        const out = execSync(`echo ${shellEscape(prompt)} | claude --print --permission-mode bypassPermissions`, {
+          encoding: "utf-8", timeout: 30_000, maxBuffer: 512 * 1024,
+        }).trim().slice(0, 200);
+        if (out) summaries.push({ entityId, name, summary: out });
+      } catch { /* skip failed entity */ }
+    }
+
+    if (!summaries.length) { log("Summarize: no summaries generated"); return; }
+
+    // One write pass: upsert all Summary nodes + edges
+    const now = new Date().toISOString();
+    await withDb(false, async (conn) => {
+      for (const { entityId, name, summary } of summaries) {
+        const summaryId = `summary:${entityId}`;
+        try {
+          const stmt = await conn.prepare(
+            "MERGE (s:Summary {id: $id}) SET s.title = $title, s.content = $content, s.text = $text, s.agent = $agent, s.source = $source, s.updated_at = $updated_at"
+          );
+          await conn.execute(stmt, { id: summaryId, title: name, content: summary, text: summary, agent: AGENT_ID, source: "brain-summarize", updated_at: now });
+          await conn.query(
+            `MATCH (s:Summary {id: '${esc(summaryId)}'}), (e:Entity {id: '${esc(entityId)}'})
+             MERGE (s)-[:SUMMARIZES {source: 'brain-summarize'}]->(e)`
+          );
+        } catch (e) { log(`Summary write error (${entityId}): ${e.message}`); }
+      }
+    });
+
+    log(`Summarize: wrote ${summaries.length} entity summaries`);
+  } catch (e) { log(`Summarize error: ${e.message}`); }
 }
 
 // --- Recent ---
@@ -258,14 +346,13 @@ async function runRecent() {
         OPTIONAL MATCH (e)-[r]-(:Entity)
         WITH e, COUNT(r) AS edge_count
         WHERE edge_count > 0
-        RETURN e.text AS text, e.type AS type, e.outcome AS outcome
+        RETURN e.text AS text, e.tags AS tags
         ORDER BY e.timestamp DESC LIMIT 10
       `),
       await safeQuery(conn, `
         MATCH (k:Knowledge)
         WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}'
-          AND k.kind IN ['fact', 'decision']
-        RETURN k.text AS text, k.kind AS kind
+        RETURN k.text AS text, k.tags AS tags
         ORDER BY k.timestamp DESC LIMIT 12
       `),
     ]);
@@ -275,10 +362,12 @@ async function runRecent() {
 
     let content = "# Recent\n";
     for (const e of filteredExp.slice(0, 5)) {
-      content += `- ${(e.text || e.type || "experience").slice(0, 100)}${e.outcome ? ` [${e.outcome}]` : ""}\n`;
+      const tagStr = (e.tags || []).length ? ` [${e.tags.join(",")}]` : "";
+      content += `- ${(e.text || "experience").slice(0, 100)}${tagStr}\n`;
     }
     for (const k of filteredKnow.slice(0, 8)) {
-      content += `- ${k.kind ? `(${k.kind}) ` : ""}${(k.text || "").slice(0, 100)}\n`;
+      const tagStr = (k.tags || []).length ? ` [${k.tags.join(",")}]` : "";
+      content += `- ${(k.text || "").slice(0, 100)}${tagStr}\n`;
     }
     if (!filteredExp.length && !filteredKnow.length) content += "_No recent meaningful activity_\n";
     setMemorySection("RECENT", content);
@@ -299,7 +388,7 @@ async function runPermanent() {
         OPTIONAL MATCH (k)-[r]-(:Entity)
         WITH k, COALESCE(SUM(r.weight), 0) + 1 AS centrality
         WHERE centrality >= 1
-        RETURN k.text AS text, 'knowledge' AS type, k.kind AS kind, centrality
+        RETURN k.text AS text, 'knowledge' AS type, centrality
         ORDER BY centrality DESC LIMIT 12
       `),
       await safeQuery(conn, `
@@ -308,7 +397,7 @@ async function runPermanent() {
         OPTIONAL MATCH (e)-[r]-(:Entity)
         WITH e, COALESCE(SUM(r.weight), 0) + 1 AS centrality
         WHERE centrality >= 2
-        RETURN e.text AS text, 'experience' AS type, e.kind AS kind, centrality
+        RETURN e.text AS text, 'experience' AS type, centrality
         ORDER BY centrality DESC LIMIT 6
       `),
       await safeQuery(conn, `
@@ -316,7 +405,7 @@ async function runPermanent() {
         OPTIONAL MATCH ()-[r]-(e)
         WITH e, COALESCE(SUM(r.weight), 0) + 1 AS centrality
         WHERE centrality >= 2
-        RETURN e.name AS text, 'entity' AS type, e.kind AS kind, centrality
+        RETURN e.name AS text, 'entity' AS type, centrality
         ORDER BY centrality DESC LIMIT 6
       `),
     ]);
@@ -332,7 +421,7 @@ async function runPermanent() {
     }
 
     const nodeList = allNodes.map((n, i) =>
-      `${i + 1}. [${n.type}${n.kind ? `/${n.kind}` : ""}] (centrality:${n.centrality.toFixed(1)}) ${(n.text || "").slice(0, 200)}`
+      `${i + 1}. [${n.type}] (centrality:${n.centrality.toFixed(1)}) ${(n.text || "").slice(0, 200)}`
     ).join("\n");
 
     const prompt = `You are writing the PERMANENT memory section for an AI agent. These are the most central nodes in the agent's knowledge graph — the facts, experiences, and entities that are most connected and referenced.\n\nYour task: write 5-10 concise bullet points capturing what is permanently true and important. Synthesize across node types. One line per bullet, no fluff, no preamble.\n\nHIGH-CENTRALITY NODES:\n${nodeList}\n\nOutput ONLY a markdown bulleted list:`;
@@ -447,24 +536,23 @@ async function runFlush(filePath) {
     const source = item.source || `local:${agent}`;
     const isKnowledge = item.type === "knowledge";
 
+    // Tags: array of optional labels (e.g. ["risk","open","resolved","decision"])
+    const tags = Array.isArray(item.tags) ? item.tags : [];
+
     try {
+      const text = item.text || item.content || item.summary || "";
       if (isKnowledge) {
-        const text = item.content || item.text || "";
-        await conn.query(
-          `MERGE (k:Knowledge {id: '${esc(id)}'})
-           SET k.text = '${esc(text)}', k.kind = '${esc(item.kind || "fact")}',
-               k.agent = '${esc(agent)}', k.timestamp = '${esc(ts)}', k.source = '${esc(source)}'`
+        const stmt = await conn.prepare(
+          "MERGE (k:Knowledge {id: $id}) SET k.text = $text, k.agent = $agent, k.timestamp = $ts, k.source = $source, k.tags = $tags"
         );
+        await conn.execute(stmt, { id, text, agent, ts, source, tags });
         const embVec = await embed(text);
         if (embVec) saveEmbedding(id, embVec);
       } else {
-        const text = item.summary || item.text || "";
-        await conn.query(
-          `MERGE (x:Experience {id: '${esc(id)}'})
-           SET x.text = '${esc(text)}', x.type = '${esc(item.type || "task_run")}', x.agent = '${esc(agent)}',
-               x.timestamp = '${esc(ts)}', x.outcome = '${esc(item.outcome || "")}',
-               x.metadata = '${esc(JSON.stringify(item.metadata || {}))}', x.source = '${esc(source)}'`
+        const stmt = await conn.prepare(
+          "MERGE (x:Experience {id: $id}) SET x.text = $text, x.agent = $agent, x.timestamp = $ts, x.source = $source, x.tags = $tags"
         );
+        await conn.execute(stmt, { id, text, agent, ts, source, tags });
         const embVec = await embed(text);
         if (embVec) saveEmbedding(id, embVec);
       }
@@ -746,6 +834,7 @@ async function run() {
       await exportIndex();
     }
     if (flags.embed) await runEmbed();
+    if (flags.summarize) await runSummarize();
     if (flags.focus) await runFocus();
     if (flags.recent) await runRecent();
     if (flags.permanent) await runPermanent();

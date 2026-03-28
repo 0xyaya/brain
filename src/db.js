@@ -74,9 +74,12 @@ export async function initSchema() {
       id         STRING,
       title      STRING,
       content    STRING,
+      text       STRING,
       source     STRING,
       source_ids STRING,
+      agent      STRING,
       created_at STRING,
+      updated_at STRING,
       PRIMARY KEY (id)
     )`,
   ];
@@ -101,17 +104,21 @@ export async function initSchema() {
     ["Entity", "source", "STRING"],
     ["Entity", "embedding", "STRING"],
     ["Entity", "created_at", "STRING"],
+    ["Entity", "timestamp", "STRING"],
+    ["Entity", "tags", "STRING[]"],
     // Knowledge columns
     ["Knowledge", "text", "STRING"],
     ["Knowledge", "source", "STRING"],
     ["Knowledge", "confidence", "DOUBLE"],
     ["Knowledge", "embedding", "STRING"],
+    ["Knowledge", "tags", "STRING[]"],
     // Experience columns
     ["Experience", "text", "STRING"],
     ["Experience", "period", "STRING"],
     ["Experience", "last_accessed_at", "STRING"],
     ["Experience", "source", "STRING"],
     ["Experience", "embedding", "STRING"],
+    ["Experience", "tags", "STRING[]"],
     // Edge new columns
     ["CONNECTS", "why", "STRING"],
     ["CONNECTS", "source", "STRING"],

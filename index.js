@@ -87,15 +87,13 @@ export default function register(api) {
     parameters: {
       type: "object",
       properties: {
-        type: { type: "string", enum: ["knowledge", "experience"], description: "Node type" },
-        kind: { type: "string", description: "knowledge: fact|decision|thread|topic|thread_closed  |  experience: task_run|conversation|research. To close an open thread: push kind='thread_closed' with the SAME entities as the open thread — FOCUS will automatically hide the open thread." },
-        content: { type: "string", description: "For knowledge nodes: the fact, decision, or thread text" },
-        summary: { type: "string", description: "For experience nodes: summary of what happened" },
-        outcome: { type: "string", enum: ["success", "fail", "partial"], description: "For experience nodes" },
-        entities: { type: "array", items: { type: "string" }, description: "Entity names this node concerns (e.g. ['brain','kuzu']). Required for graph edge wiring. For thread_closed: use SAME entities as the open thread you are closing." },
-        derives: { type: "array", items: { type: "string" }, description: "IDs of experience nodes this knowledge was derived from (creates DERIVED edges)." },
+        type: { type: "string", enum: ["knowledge", "experience"], description: "knowledge = fact, decision, or ongoing concern. experience = task or event that happened." },
+        text: { type: "string", description: "Free-form text — what happened, was learned, or is being tracked. Write clearly and specifically." },
+        entities: { type: "array", items: { type: "string" }, description: "Entity names this node concerns — creates graph edges. Use real names: people, projects, systems (e.g. ['kuzu','brain','yann'])." },
+        tags: { type: "array", items: { type: "string" }, description: "Optional labels (e.g. ['risk','open','resolved','decision','success']). Use when classification adds value beyond the text." },
+        derives: { type: "array", items: { type: "string" }, description: "For knowledge: IDs of experience nodes this was derived from (creates DERIVED edges)." },
       },
-      required: ["type"],
+      required: ["type", "text"],
     },
     async execute(callId, params, ctx) {
       const agentId = ctx?.agentId || config.agentId;
