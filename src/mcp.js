@@ -37,6 +37,8 @@ const AGENT_ID = process.env.BRAIN_AGENT_ID || "neo";
 const CORPUS_ROOT = (process.env.BRAIN_CORPUS_ROOT || path.join(os.homedir(), "corpus")).replace("~", os.homedir());
 const BRAIN_DIR = process.env.BRAIN_DIR || path.join(os.homedir(), "corpus", "brain");
 
+const shellEscape = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
 function runBrain(args, input) {
   const env = {
     ...process.env,
@@ -79,24 +81,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "brain_push",
-      description: "Push a new experience, knowledge fact, or decision into the agent's memory graph.",
+      description: "Push a knowledge or experience node into the agent's memory graph.",
       inputSchema: {
         type: "object",
         properties: {
-          type: {
-            type: "string",
-            enum: ["experience", "knowledge"],
-            description: "Node type",
+          type: { type: "string", enum: ["knowledge", "experience"], description: "Node type" },
+          text: { type: "string", description: "What happened or was learned — write clearly and specifically" },
+          entities: {
+            type: "array",
+            items: { type: "string" },
+            description: "Everything this node is about — real names AND classification words (e.g. ['postgres','migrations','decision','risk'])"
           },
-          kind: {
-            type: "string",
-            description: "For knowledge: fact | decision | topic | thread. For experience: task_run | conversation etc.",
+          derives: {
+            type: "array",
+            items: { type: "string" },
+            description: "For knowledge: IDs of experience nodes this was derived from"
           },
-          content: { type: "string", description: "For knowledge nodes: the fact or decision text" },
-          summary: { type: "string", description: "For experience nodes: summary of what happened" },
-          outcome: { type: "string", enum: ["success", "fail", "partial"], description: "For experience nodes" },
         },
-        required: ["type"],
+        required: ["type", "text"],
       },
     },
     {
@@ -116,7 +118,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          id: { type: "string", description: "Node ID (e.g. 'memory:karpathy:recent', 'know:abc123')" },
+          id: { type: "string", description: "Node ID from brain_recall or brain_explore" },
+        },
+        required: ["id"],
+      },
+    },
+    {
+      name: "brain_remove",
+      description: "Delete a node by ID. Use to remove bad or stale memory. MEMORY.md self-heals on next consolidation.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Node ID to delete" },
         },
         required: ["id"],
       },
@@ -138,15 +151,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "brain_push": {
-        const payload = { type: args.type, agent: AGENT_ID };
-        if (args.type === "knowledge") {
-          payload.kind = args.kind || "fact";
-          payload.content = args.content || "";
-        } else {
-          payload.type = "experience";
-          payload.summary = args.summary || "";
-          payload.outcome = args.outcome || "success";
-        }
+        const payload = {
+          type: args.type,
+          text: args.text || "",
+          entities: args.entities || [],
+          ...(args.derives?.length ? { derives: args.derives } : {}),
+          agent: AGENT_ID,
+        };
         result = runBrain(`push --agent ${AGENT_ID} '${JSON.stringify(payload)}'`);
         break;
       }
@@ -158,6 +169,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "brain_get": {
         result = runBrain(`get "${args.id.replace(/"/g, '\\"')}"`);
+        break;
+      }
+
+      case "brain_remove": {
+        result = runBrain(`remove ${shellEscape(args.id)}`);
         break;
       }
 
