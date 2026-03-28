@@ -636,9 +636,9 @@ async function runMaintain() {
   await initSchema();
   const conn = await getDb();
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  let pruned = 0, strengthened = 0;
+  let pruned = 0, strengthened = 0, orphansDeleted = 0;
 
-  // Prune old experiences with no derived knowledge
+  // Prune old experiences with no derived knowledge (>30 days, unlinked)
   try {
     const rows = await (await conn.query(
       `MATCH (e:Experience) WHERE e.timestamp < '${esc(cutoff)}' AND NOT EXISTS { MATCH (e)-[:DERIVED]->(:Knowledge) } RETURN e.id AS id`
@@ -648,20 +648,37 @@ async function runMaintain() {
     }
   } catch (e) { log(`Prune error: ${e.message}`); }
 
+  // Purge isolated Knowledge nodes (no edges = invisible to recall and centrality)
+  try {
+    const orphans = await (await conn.query(
+      `MATCH (k:Knowledge) WHERE NOT (k)-[]-() RETURN k.id AS id`
+    )).getAll();
+    const { loadEmbeddings, saveEmbeddings } = await import("../src/embed.js");
+    const store = loadEmbeddings();
+    let embChanged = false;
+    for (const row of orphans) {
+      try {
+        await conn.query(`MATCH (k:Knowledge {id: '${esc(row.id)}'}) DETACH DELETE k`);
+        if (store[row.id]) { delete store[row.id]; embChanged = true; }
+        orphansDeleted++;
+      } catch { /* skip */ }
+    }
+    if (embChanged) saveEmbeddings(store);
+  } catch (e) { log(`Orphan purge error: ${e.message}`); }
+
   // Strengthen recently traversed edges
   // Note: ABOUT crashes LadybugDB (csr_node_group.cpp assertion) — skipped until upstream fix
   const now = new Date().toISOString();
   for (const rel of ["DERIVED", "INVOLVES", "RELATES_TO", "FOLLOWS"]) {
     try {
       await conn.query(`MATCH ()-[r:${rel}]->() SET r.weight = r.weight + 1`);
-      await conn.query(`MATCH (x:Experience)-[r:${rel}]->() SET x.last_accessed_at = '${esc(now)}'`);
       const rows = await (await conn.query(`MATCH ()-[r:${rel}]->() RETURN count(r) AS c`)).getAll();
       strengthened += rows[0]?.c || 0;
     } catch (e) { log(`Strengthen ${rel} error: ${e.message}`); }
   }
 
   await closeDb();
-  log(`Maintenance done. Pruned ${pruned} stale experiences, strengthened ${strengthened} edges.`);
+  log(`Maintenance done. Pruned ${pruned} stale experiences, deleted ${orphansDeleted} isolated nodes, strengthened ${strengthened} edges.`);
 }
 
 // --- Export index.md ---
