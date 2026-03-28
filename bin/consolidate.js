@@ -545,7 +545,7 @@ ${content.slice(0, 6000)}`;
 
 async function runIngest(memoryDir, threshold = 0.85) {
   const files = fs.readdirSync(memoryDir)
-    .filter(f => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+    .filter(f => /^\d{4}-\d{2}-\d{2}.*\.md$/.test(f))
     .sort();
 
   log(`Ingest: found ${files.length} daily log files in ${memoryDir}`);
