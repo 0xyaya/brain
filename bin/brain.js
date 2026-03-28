@@ -201,15 +201,15 @@ switch (cmd) {
                   : id.startsWith("know:") ? "Knowledge" : "Experience";
                 const agentFilter = (table !== "Entity" && recallAgent)
                   ? ` WHERE n.agent = '${recallAgent}'` : "";
-                const q = `MATCH (n:${table} {id: '${id}'})${agentFilter} RETURN n.text AS text, n.kind AS kind, n.agent AS agent`;
+                const q = `MATCH (n:${table} {id: '${id}'})${agentFilter} RETURN n.text AS text, n.tags AS tags, n.agent AS agent`;
                 const rows = await (await conn.query(q)).getAll();
                 if (rows[0]) {
                   results.push({
                     source: "graph",
                     id,
                     type: table.toLowerCase(),
-                    kind: rows[0].kind || null,
-                    content: (rows[0].text || "").slice(0, 200),
+                    text: (rows[0].text || "").slice(0, 200),
+                    tags: rows[0].tags || [],
                     agent: rows[0].agent || null,
                     score: Math.round(score * 100) / 100,
                   });
@@ -248,7 +248,7 @@ switch (cmd) {
           const paras = content.split(/\n{2,}/);
           for (const para of paras) {
             if (para.toLowerCase().includes(queryLower)) {
-              results.push({ source: "daily", date: dateStr, content: para.trim().slice(0, 300) });
+              results.push({ source: "daily", date: dateStr, text: para.trim().slice(0, 300) });
               if (results.filter(r => r.source === "daily").length >= 3) break;
             }
           }

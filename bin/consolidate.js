@@ -259,14 +259,20 @@ async function runSummarize() {
     const toSummarize = await withDb(true, async (conn) => {
       const result = [];
       for (const { entityId, entityName, centrality } of topEntities) {
-        const nodes = await safeQuery(conn, `
-          MATCH (n)-[:ABOUT|INVOLVES]->(e:Entity {id: '${esc(entityId)}'})
-          WHERE (n:Knowledge OR n:Experience) AND n.agent = '${esc(AGENT_ID)}'
-            AND NOT ('summary' IN coalesce(n.tags, []))
-          RETURN n.text AS text, n.timestamp AS ts
-          ORDER BY n.timestamp DESC LIMIT 15
+        const kNodes = await safeQuery(conn, `
+          MATCH (k:Knowledge)-[:ABOUT]->(e:Entity {id: '${esc(entityId)}'})
+          WHERE k.agent = '${esc(AGENT_ID)}'
+          RETURN k.text AS text, k.timestamp AS ts
+          ORDER BY k.timestamp DESC LIMIT 10
         `);
-        if (nodes.length >= 3) result.push({ entityId, entityName, centrality, nodes });
+        const xNodes = await safeQuery(conn, `
+          MATCH (x:Experience)-[:INVOLVES]->(e:Entity {id: '${esc(entityId)}'})
+          WHERE x.agent = '${esc(AGENT_ID)}'
+          RETURN x.text AS text, x.timestamp AS ts
+          ORDER BY x.timestamp DESC LIMIT 5
+        `);
+        const nodes = [...kNodes, ...xNodes].sort((a, b) => (b.ts || "").localeCompare(a.ts || "")).slice(0, 15);
+        if (nodes.length >= 2) result.push({ entityId, entityName, centrality, nodes });
       }
       return result;
     });
