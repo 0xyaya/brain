@@ -103,7 +103,7 @@ export default function register(api) {
       };
       fs.mkdirSync(BRAIN_DIR, { recursive: true });
       fs.appendFileSync(QUEUE_PATH, JSON.stringify(node) + "\n");
-      // brain-drain service is the single flush authority — just write to queue
+      // flush cron (brain-flush-30m) drains the queue every 30min
       return { content: [{ type: "text", text: "OK" }] };
     },
   });
@@ -163,7 +163,7 @@ export default function register(api) {
     parameters: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Node ID to delete (e.g. know:abc123, exp:xyz, entity:brain-drain)" },
+        id: { type: "string", description: "Node ID to delete — get it from brain_recall or brain_explore (e.g. know:abc123, exp:xyz, entity:kuzu)" },
       },
       required: ["id"],
     },
@@ -190,49 +190,16 @@ export default function register(api) {
       const ts = new Date().toISOString();
       fs.mkdirSync(BRAIN_DIR, { recursive: true });
       fs.appendFileSync(QUEUE_PATH, JSON.stringify({
-        type: "experience", kind: "conversation",
+        type: "experience",
+        text: "Session compaction — context trimmed",
         agent: agentId,
-        summary: "Session compaction — context trimmed",
-        outcome: "success", timestamp: ts,
+        timestamp: ts,
         entities: [agentId],
       }) + "\n");
     } catch { /* silent — hook must never crash the host */ }
   });
 
-  // ─── Periodic: 5min drain ──────────────────────────────────────────────────
-  // Single drain authority — one consolidate process at a time, never parallel.
-  // Reads queue, picks the first agent with items, runs drain+focus+recent+embed.
-  // Next tick handles remaining agents (lock ensures serialization).
-  api.registerService({
-    id: "brain-drain",
-    start: () => {
-      setTimeout(() => {
-        const drain = () => {
-          try {
-            if (!fs.existsSync(QUEUE_PATH)) return;
-            const raw = fs.readFileSync(QUEUE_PATH, "utf-8").trim();
-            if (!raw) return;
-
-            // Collect unique agent IDs from queued items (preserve order)
-            const agentIds = [];
-            for (const line of raw.split("\n")) {
-              try {
-                const item = JSON.parse(line);
-                if (item.agent && !agentIds.includes(item.agent)) agentIds.push(item.agent);
-              } catch { /* skip bad lines */ }
-            }
-            if (agentIds.length === 0) return;
-
-            // Spawn ONE consolidate for the first agent — lock prevents concurrent runs.
-            // Remaining agents will be picked up on next drain tick (5min).
-            spawnConsolidate(agentIds[0], "--drain", "--focus", "--recent", "--embed");
-          } catch { /* silent */ }
-        };
-        drain();
-        setInterval(drain, 5 * 60 * 1000);
-      }, 5 * 60 * 1000);
-    },
-  });
+    // Flush handled by external 30m cron (brain-flush-30m) — no in-process drain service needed
 
   // ─── Every 30min: extract session logs → graph for ALL agents ─────────────
   api.registerService({

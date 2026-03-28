@@ -150,7 +150,7 @@ function validateItem(item) {
   if (item.type === "graph_import") return true; // handled separately
 
   // Validate text fields are readable strings (not binary garbage)
-  const textField = item.text || item.content || item.summary;
+  const textField = item.text;
   if (textField !== undefined) {
     if (typeof textField !== "string") return false;
     if (textField.length > 0) {
@@ -539,7 +539,7 @@ async function runFlush(filePath) {
     const tags = Array.isArray(item.tags) ? item.tags : [];
 
     try {
-      const text = item.text || item.content || item.summary || "";
+      const text = item.text || "";
       if (isKnowledge) {
         const stmt = await conn.prepare(
           "MERGE (k:Knowledge {id: $id}) SET k.text = $text, k.agent = $agent, k.timestamp = $ts, k.source = $source, k.tags = $tags"
@@ -702,11 +702,11 @@ async function exportIndex() {
     let md = "";
     for (const k of knowledges) {
       const tagStr = (k.tags || []).length ? `\ntags: ${k.tags.join(",")}` : "";
-      md += `## ${k.id}\ntype: knowledge\nagent: ${k.agent || ""}\ncontent: ${k.text || ""}${tagStr}\ntimestamp: ${k.timestamp || ""}\n\n`;
+      md += `## ${k.id}\ntype: knowledge\nagent: ${k.agent || ""}\ntext: ${k.text || ""}${tagStr}\ntimestamp: ${k.timestamp || ""}\n\n`;
     }
     for (const e of experiences) {
       const tagStr = (e.tags || []).length ? `\ntags: ${e.tags.join(",")}` : "";
-      md += `## ${e.id}\ntype: experience\nagent: ${e.agent || ""}\nsummary: ${e.text || ""}${tagStr}\ntimestamp: ${e.timestamp || ""}\n\n`;
+      md += `## ${e.id}\ntype: experience\nagent: ${e.agent || ""}\ntext: ${e.text || ""}${tagStr}\ntimestamp: ${e.timestamp || ""}\n\n`;
     }
     for (const e of entities) {
       md += `## ${e.id}\ntype: entity\nname: ${e.name || ""}`;
@@ -818,7 +818,7 @@ async function runIngest(memoryDir, threshold = 0.82) {
 
     for (const item of items) {
       try {
-        const text = item.text || item.content || item.summary || "";
+        const text = item.text || "";
         if (!text) { errors++; continue; }
 
         const dup = await isDuplicate(text, threshold);
