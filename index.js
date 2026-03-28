@@ -156,6 +156,31 @@ export default function register(api) {
     },
   });
 
+  // ─── Native LLM tool: brain_remove ─────────────────────────────────────────
+  api.registerTool({
+    name: "brain_remove",
+    description: "Delete a memory node by ID. Use to remove bad, stale, or incorrect nodes. MEMORY.md self-heals on next consolidate. Get the ID from brain_recall or brain_explore first.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Node ID to delete (e.g. know:abc123, exp:xyz, entity:brain-drain)" },
+      },
+      required: ["id"],
+    },
+    async execute(callId, params) {
+      try {
+        const out = execSync(
+          `node ${BIN_DIR}/brain.js remove ${shellEscape(params.id)}`,
+          { encoding: "utf-8", timeout: 15_000 }
+        );
+        return { content: [{ type: "text", text: out.trim() }] };
+      } catch (e) {
+        const err = e?.stderr?.toString?.() || e?.message || "unknown";
+        return { content: [{ type: "text", text: `Error: ${err.slice(0, 200)}` }] };
+      }
+    },
+  });
+
   // ─── after_compaction hook ──────────────────────────────────────────────────
   // memoryFlush prompt (pre-compaction) handles structured brain_push calls.
   // This hook just records that a compaction occurred as a lightweight experience node.

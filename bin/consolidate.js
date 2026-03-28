@@ -80,7 +80,7 @@ const shellEscape = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
 // --daily         write daily log file
 // --maintain      prune old experiences, strengthen edges
 // --embed         backfill embeddings for existing nodes
-const flags = { focus: false, recent: false, permanent: false, summarize: false, daily: false, maintain: false, embed: false, input: null, ingest: false, ingestDir: null, threshold: null };
+const flags = { focus: false, recent: false, permanent: false, summarize: false, maintain: false, embed: false, input: null, ingest: false, ingestDir: null, threshold: null };
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
   if (a === "--input" && process.argv[i + 1]) flags.input = process.argv[++i];
@@ -838,7 +838,7 @@ async function run() {
     if (flags.focus) await runFocus();
     if (flags.recent) await runRecent();
     if (flags.permanent) await runPermanent();
-    if (flags.daily) await runDaily();
+
     // Write MEMORY.md once at the end — full file, no markers
     if (flags.focus || flags.recent || flags.permanent) { writeMemory(); log("writeMemory: done"); }
     log("consolidate complete.");

@@ -58,6 +58,7 @@ Usage:
   brain recall [--buffer <file>] [--agent <id>] [--days N] <query>
   brain explore <entity>
   brain get <id>
+  brain remove <id>                                      Delete a node by ID (+ removes embedding)
   brain consolidate [--agent <id>] [--flags]             Update MEMORY.md sections
 
 Consolidate flags:
@@ -325,6 +326,45 @@ switch (cmd) {
       await closeDb();
     } catch (e) {
       console.error("Error:", e.message);
+    }
+    break;
+  }
+
+  case "remove": {
+    const id = args[0];
+    if (!id) {
+      console.error("Usage: brain remove <id>");
+      process.exit(1);
+    }
+    const { getDb, closeDb } = await import("../src/db.js");
+    const { loadEmbeddings, saveEmbeddings } = await import("../src/embed.js");
+    let deleted = false;
+    try {
+      const conn = await getDb(false);
+      for (const table of ["Knowledge", "Experience", "Entity"]) {
+        try {
+          const check = await (await conn.query(`MATCH (n:${table} {id: '${id.replace(/'/g, "\\'")}' }) RETURN n.id AS id`)).getAll();
+          if (check.length > 0) {
+            await conn.query(`MATCH (n:${table} {id: '${id.replace(/'/g, "\\'")}' }) DETACH DELETE n`);
+            deleted = true;
+            console.log(`Deleted ${table} node: ${id}`);
+            break;
+          }
+        } catch { /* try next */ }
+      }
+      await closeDb();
+      if (!deleted) { console.log(`Not found: ${id}`); process.exit(1); }
+      // Remove embedding
+      const store = loadEmbeddings();
+      if (store[id]) {
+        delete store[id];
+        saveEmbeddings(store);
+        console.log(`Removed embedding for: ${id}`);
+      }
+      console.log("OK — MEMORY.md will self-heal on next consolidate");
+    } catch (e) {
+      console.error("Error:", e.message);
+      process.exit(1);
     }
     break;
   }
