@@ -175,9 +175,10 @@ async function runFocus() {
       safeQuery(conn, `
         MATCH (k:Knowledge)
         WHERE k.agent = '${esc(AGENT_ID)}' AND k.kind IN ['thread', 'topic']
-        OPTIONAL MATCH (k)-[r]-(:Entity)
-        WITH k, COALESCE(SUM(r.weight), 0) + 1 AS centrality
-        RETURN k.text AS text, k.timestamp AS ts, centrality
+        OPTIONAL MATCH (k)-[r1]-(:Entity)
+        OPTIONAL MATCH (k)-[r2]-(:Knowledge)
+        WITH k, COALESCE(SUM(r1.weight), 0) + COALESCE(SUM(r2.weight), 0) + 1 AS centrality
+        RETURN k.id AS id, k.text AS text, k.timestamp AS ts, centrality
       `)
     );
     const now = Date.now();
@@ -185,14 +186,14 @@ async function runFocus() {
       .map(r => {
         const days = (now - new Date(r.ts || now).getTime()) / 86400000;
         const score = r.centrality * Math.exp(-days * FOCUS_LAMBDA);
-        return { text: r.text, score };
+        return { id: r.id, text: r.text, score };
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, 5);
 
     let content = "# Focus\n";
     content += scored.length > 0
-      ? scored.map(t => `- ${(t.text || "").slice(0, 120)}`).join("\n") + "\n"
+      ? scored.map(t => `- [${t.id}] ${(t.text || "").slice(0, 110)}`).join("\n") + "\n"
       : "_No open threads_\n";
     setMemorySection("FOCUS", content);
     log(`Focus: ${scored.length} threads (weighted centrality × decay)`);
@@ -470,6 +471,23 @@ async function runFlush(filePath) {
           );
           edges++;
         } catch { /* experience may not exist yet */ }
+      }
+    }
+
+    // --- RELATES_TO edges: explicit Knowledge→Knowledge links ---
+    // Used for thread_closed nodes to declare what they resolve.
+    // Format: relates_to: ["know:abc123"]  →  RELATES_TO {why:"resolves"}
+    if (item.relates_to) {
+      const relatesList = Array.isArray(item.relates_to) ? item.relates_to : [item.relates_to];
+      for (const targetId of relatesList) {
+        const targetTable = targetId.startsWith("exp:") ? "Experience" : "Knowledge";
+        try {
+          await conn.query(
+            `MATCH (n:${nodeTable} {id: '${esc(id)}'}), (t:${targetTable} {id: '${esc(targetId)}'})
+             MERGE (n)-[:RELATES_TO {why: 'resolves', source: '${esc(source)}', weight: 1.0}]->(t)`
+          );
+          edges++;
+        } catch { /* target may not exist yet */ }
       }
     }
 

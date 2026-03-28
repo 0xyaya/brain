@@ -69,10 +69,12 @@ export default function register(api) {
       try {
         const out = execSync(
           `node ${BIN_DIR}/brain.js recall --agent ${shellEscape(agentId)} ${daysFlag} ${shellEscape(params.query)}`,
-          { encoding: "utf-8", timeout: 45_000, env: { ...process.env, BRAIN_AGENT_ID: agentId } }
+          { encoding: "utf-8", timeout: 45_000, env: { ...process.env, BRAIN_AGENT_ID: agentId }, stdio: ["pipe", "pipe", "pipe"] }
         );
         return { content: [{ type: "text", text: out.trim() || "[]" }] };
       } catch (e) {
+        const err = e?.stderr?.toString?.() || e?.message || "unknown";
+        console.error(`[brain_recall] error: ${err.slice(0, 300)}`);
         return { content: [{ type: "text", text: "[]" }] };
       }
     },
@@ -86,12 +88,13 @@ export default function register(api) {
       type: "object",
       properties: {
         type: { type: "string", enum: ["knowledge", "experience"], description: "Node type" },
-        kind: { type: "string", description: "knowledge: fact|decision|thread|topic  |  experience: task_run|conversation|research" },
+        kind: { type: "string", description: "knowledge: fact|decision|thread|topic|thread_closed  |  experience: task_run|conversation|research. Use thread_closed to resolve an open thread — it disappears from FOCUS automatically." },
         content: { type: "string", description: "For knowledge nodes: the fact, decision, or thread text" },
         summary: { type: "string", description: "For experience nodes: summary of what happened" },
         outcome: { type: "string", enum: ["success", "fail", "partial"], description: "For experience nodes" },
         entities: { type: "array", items: { type: "string" }, description: "Entity names this node concerns (e.g. ['brain','kuzu']). Required for graph edge wiring." },
         derives: { type: "array", items: { type: "string" }, description: "IDs of experience nodes this knowledge was derived from (creates DERIVED edges)." },
+        relates_to: { type: "array", items: { type: "string" }, description: "IDs of Knowledge nodes this node relates to (creates RELATES_TO {why:'resolves'} edges). Use when closing a thread: pass the open thread's ID shown in FOCUS." },
       },
       required: ["type"],
     },
