@@ -213,6 +213,13 @@ switch (cmd) {
                     agent: rows[0].agent || null,
                     score: Math.round(score * 100) / 100,
                   });
+                  // Boost edge weights on recalled nodes (cap at 5.0)
+                  try {
+                    await conn.query(
+                      `MATCH (n:${table} {id: '${id}'})-[r]-(:Entity)
+                       SET r.weight = CASE WHEN r.weight < 4.9 THEN r.weight + 0.1 ELSE 5.0 END`
+                    );
+                  } catch { /* no edges yet — skip */ }
                 }
               } catch { /* skip */ }
             }

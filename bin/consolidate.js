@@ -165,64 +165,151 @@ function validateItem(item) {
 }
 
 // --- Focus ---
+// Score = weighted_centrality × exp(-days_old × λ)
+// λ=0.05 → ~14 day half-life so important threads survive short detours
+const FOCUS_LAMBDA = 0.05;
+
 async function runFocus() {
   try {
-    const threads = await withDb(true, (conn) =>
-      safeQuery(conn, `MATCH (k:Knowledge {kind: 'thread', agent: '${esc(AGENT_ID)}'}) RETURN k.text AS text, k.timestamp AS ts ORDER BY k.timestamp DESC LIMIT 5`)
+    const rows = await withDb(true, (conn) =>
+      safeQuery(conn, `
+        MATCH (k:Knowledge)
+        WHERE k.agent = '${esc(AGENT_ID)}' AND k.kind IN ['thread', 'topic']
+        OPTIONAL MATCH (k)-[r]-(:Entity)
+        WITH k, COALESCE(SUM(r.weight), 0) + 1 AS centrality
+        RETURN k.text AS text, k.timestamp AS ts, centrality
+      `)
     );
+    const now = Date.now();
+    const scored = rows
+      .map(r => {
+        const days = (now - new Date(r.ts || now).getTime()) / 86400000;
+        const score = r.centrality * Math.exp(-days * FOCUS_LAMBDA);
+        return { text: r.text, score };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+
     let content = "# Focus\n";
-    content += threads.length > 0
-      ? threads.map(t => `- ${(t.text || "").slice(0, 120)}`).join("\n") + "\n"
+    content += scored.length > 0
+      ? scored.map(t => `- ${(t.text || "").slice(0, 120)}`).join("\n") + "\n"
       : "_No open threads_\n";
     setMemorySection("FOCUS", content);
-    log(`Focus: ${threads.length} threads`);
+    log(`Focus: ${scored.length} threads (weighted centrality × decay)`);
   } catch (e) { log(`Focus error: ${e.message}`); }
 }
 
 // --- Recent ---
+// Filter noise: exclude heartbeat acks, empty cron runs, zero-edge experiences
+// All outcomes included (failures are meaningful)
+const RECENT_NOISE = ['heartbeat_ok', 'heartbeat ok', 'cron', 'heartbeat'];
+
+function isNoise(text) {
+  if (!text) return true;
+  const t = text.toLowerCase();
+  return RECENT_NOISE.some(n => t.includes(n));
+}
+
 async function runRecent() {
   try {
-    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const cutoff = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
     const [experiences, knowledges] = await withDb(true, async (conn) => [
-      await safeQuery(conn, `MATCH (e:Experience) WHERE e.agent = '${esc(AGENT_ID)}' AND e.timestamp > '${esc(cutoff)}' RETURN e.text AS text, e.type AS type, e.outcome AS outcome ORDER BY e.timestamp DESC LIMIT 5`),
-      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}' AND k.kind IN ['fact','decision'] RETURN k.text AS text, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 8`),
+      await safeQuery(conn, `
+        MATCH (e:Experience)
+        WHERE e.agent = '${esc(AGENT_ID)}' AND e.timestamp > '${esc(cutoff)}'
+        OPTIONAL MATCH (e)-[r]-(:Entity)
+        WITH e, COUNT(r) AS edge_count
+        WHERE edge_count > 0
+        RETURN e.text AS text, e.type AS type, e.outcome AS outcome
+        ORDER BY e.timestamp DESC LIMIT 10
+      `),
+      await safeQuery(conn, `
+        MATCH (k:Knowledge)
+        WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}'
+          AND k.kind IN ['fact', 'decision']
+        RETURN k.text AS text, k.kind AS kind
+        ORDER BY k.timestamp DESC LIMIT 12
+      `),
     ]);
+
+    const filteredExp = experiences.filter(e => !isNoise(e.text));
+    const filteredKnow = knowledges.filter(k => !isNoise(k.text));
+
     let content = "# Recent\n";
-    for (const e of experiences) {
+    for (const e of filteredExp.slice(0, 5)) {
       content += `- ${(e.text || e.type || "experience").slice(0, 100)}${e.outcome ? ` [${e.outcome}]` : ""}\n`;
     }
-    for (const k of knowledges) {
+    for (const k of filteredKnow.slice(0, 8)) {
       content += `- ${k.kind ? `(${k.kind}) ` : ""}${(k.text || "").slice(0, 100)}\n`;
     }
-    if (!experiences.length && !knowledges.length) content += "_No recent activity_\n";
+    if (!filteredExp.length && !filteredKnow.length) content += "_No recent meaningful activity_\n";
     setMemorySection("RECENT", content);
-    log(`Recent: ${experiences.length} experiences, ${knowledges.length} knowledges`);
+    log(`Recent: ${filteredExp.length} experiences, ${filteredKnow.length} knowledges (noise filtered)`);
   } catch (e) { log(`Recent error: ${e.message}`); }
 }
 
 // --- Permanent ---
+// All node types ranked by weighted centrality (sum of edge weights).
+// LLM synthesizes from structured data — not extracting from raw text,
+// but formulating readable memory lines from already-validated graph nodes.
 async function runPermanent() {
   try {
-    const knowledges = await withDb(true, (conn) =>
-      safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' RETURN k.text AS text, k.kind AS kind ORDER BY k.timestamp DESC LIMIT 20`)
-    );
-    if (!knowledges.length) {
-      setMemorySection("PERMANENT", "# Permanent\n_No knowledge yet_\n");
-      log("Permanent: no knowledges to summarize");
+    const [knowledge, experience, entity] = await withDb(true, async (conn) => [
+      await safeQuery(conn, `
+        MATCH (k:Knowledge)
+        WHERE k.agent = '${esc(AGENT_ID)}'
+        OPTIONAL MATCH (k)-[r]-(:Entity)
+        WITH k, COALESCE(SUM(r.weight), 0) + 1 AS centrality
+        WHERE centrality >= 1
+        RETURN k.text AS text, 'knowledge' AS type, k.kind AS kind, centrality
+        ORDER BY centrality DESC LIMIT 12
+      `),
+      await safeQuery(conn, `
+        MATCH (e:Experience)
+        WHERE e.agent = '${esc(AGENT_ID)}'
+        OPTIONAL MATCH (e)-[r]-(:Entity)
+        WITH e, COALESCE(SUM(r.weight), 0) + 1 AS centrality
+        WHERE centrality >= 2
+        RETURN e.text AS text, 'experience' AS type, e.kind AS kind, centrality
+        ORDER BY centrality DESC LIMIT 6
+      `),
+      await safeQuery(conn, `
+        MATCH (e:Entity)
+        OPTIONAL MATCH ()-[r]-(e)
+        WITH e, COALESCE(SUM(r.weight), 0) + 1 AS centrality
+        WHERE centrality >= 2
+        RETURN e.name AS text, 'entity' AS type, e.kind AS kind, centrality
+        ORDER BY centrality DESC LIMIT 6
+      `),
+    ]);
+
+    const allNodes = [...knowledge, ...experience, ...entity]
+      .sort((a, b) => b.centrality - a.centrality)
+      .slice(0, 20);
+
+    if (!allNodes.length) {
+      setMemorySection("PERMANENT", "# Permanent\n_No high-centrality nodes yet_\n");
+      log("Permanent: no nodes with sufficient centrality");
       return;
     }
-    const knowledgeList = knowledges.map((k, i) => `${i + 1}. (${k.kind || "fact"}) ${(k.text || "").slice(0, 200)}`).join("\n");
-    const prompt = `You are summarizing an agent's most important knowledge into permanent memory facts. Given these ${knowledges.length} knowledge items, distill them into 5-10 concise permanent facts. Return ONLY a markdown bulleted list, no preamble.\n\nKNOWLEDGE ITEMS:\n${knowledgeList}\n\nOutput format:\n- fact one\n- fact two\n...`;
+
+    const nodeList = allNodes.map((n, i) =>
+      `${i + 1}. [${n.type}${n.kind ? `/${n.kind}` : ""}] (centrality:${n.centrality.toFixed(1)}) ${(n.text || "").slice(0, 200)}`
+    ).join("\n");
+
+    const prompt = `You are writing the PERMANENT memory section for an AI agent. These are the most central nodes in the agent's knowledge graph — the facts, experiences, and entities that are most connected and referenced.\n\nYour task: write 5-10 concise bullet points capturing what is permanently true and important. Synthesize across node types. One line per bullet, no fluff, no preamble.\n\nHIGH-CENTRALITY NODES:\n${nodeList}\n\nOutput ONLY a markdown bulleted list:`;
+
     let summary;
     try {
       summary = execSync(`echo ${shellEscape(prompt)} | claude --print --permission-mode bypassPermissions`, {
         encoding: "utf-8", timeout: 120_000, maxBuffer: 1024 * 1024,
       }).trim();
     } catch {
-      summary = knowledges.slice(0, 10).map(k => `- (${k.kind || "fact"}) ${(k.content || "").slice(0, 120)}`).join("\n");
+      // Fallback: just list top nodes directly
+      summary = allNodes.slice(0, 10).map(n => `- [${n.type}] ${(n.text || "").slice(0, 120)}`).join("\n");
     }
     setMemorySection("PERMANENT", `# Permanent\n${summary}\n`);
-    log(`Permanent: summarized ${knowledges.length} knowledges`);
+    log(`Permanent: synthesized from ${allNodes.length} high-centrality nodes`);
   } catch (e) { log(`Permanent error: ${e.message}`); }
 }
 
