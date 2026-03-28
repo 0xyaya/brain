@@ -150,7 +150,7 @@ function validateItem(item) {
   if (item.type === "graph_import") return true; // handled separately
 
   // Validate text fields are readable strings (not binary garbage)
-  const textField = item.type === "knowledge" ? item.content : item.summary;
+  const textField = item.text || item.content || item.summary;
   if (textField !== undefined) {
     if (typeof textField !== "string") return false;
     if (textField.length > 0) {
@@ -270,9 +270,9 @@ async function runSummarize() {
     const rows = await withDb(true, (conn) =>
       safeQuery(conn, `
         MATCH (k:Knowledge)-[:ABOUT]->(e:Entity)
-        WHERE k.agent = '${esc(AGENT_ID)}' AND k.kind IN ['thread', 'topic', 'thread_update', 'thread_closed']
+        WHERE k.agent = '${esc(AGENT_ID)}'
         RETURN e.id AS entityId, e.name AS entityName,
-               k.text AS text, k.kind AS kind, k.timestamp AS ts
+               k.text AS text, k.tags AS tags, k.timestamp AS ts
         ORDER BY e.id ASC, k.timestamp ASC
       `)
     );
@@ -448,18 +448,21 @@ async function runDaily() {
     const dayStart = new Date(today); dayStart.setHours(0, 0, 0, 0);
     const cutoff = dayStart.toISOString();
     const [experiences, knowledges] = await withDb(true, async (conn) => [
-      await safeQuery(conn, `MATCH (e:Experience) WHERE e.agent = '${esc(AGENT_ID)}' AND e.timestamp > '${esc(cutoff)}' RETURN e.text AS text, e.type AS type, e.outcome AS outcome, e.timestamp AS ts ORDER BY e.timestamp ASC`),
-      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}' RETURN k.text AS text, k.kind AS kind ORDER BY k.timestamp ASC`),
+      await safeQuery(conn, `MATCH (e:Experience) WHERE e.agent = '${esc(AGENT_ID)}' AND e.timestamp > '${esc(cutoff)}' RETURN e.text AS text, e.tags AS tags, e.timestamp AS ts ORDER BY e.timestamp ASC`),
+      await safeQuery(conn, `MATCH (k:Knowledge) WHERE k.agent = '${esc(AGENT_ID)}' AND k.timestamp > '${esc(cutoff)}' RETURN k.text AS text, k.tags AS tags ORDER BY k.timestamp ASC`),
     ]);
     let md = `# ${dateStr}\n\n`;
     if (experiences.length) {
       md += "## Experiences\n";
-      for (const e of experiences) md += `- ${(e.ts || "").slice(11, 16)} ${(e.text || e.type || "experience").slice(0, 150)}${e.outcome ? ` [${e.outcome}]` : ""}\n`;
+      for (const e of experiences) {
+        const tagStr = (e.tags || []).length ? ` [${e.tags.join(",")}]` : "";
+        md += `- ${(e.ts || "").slice(11, 16)} ${(e.text || "experience").slice(0, 150)}${tagStr}\n`;
+      }
       md += "\n";
     }
     if (knowledges.length) {
       md += "## Knowledges\n";
-      for (const k of knowledges) md += `- ${k.kind ? `(${k.kind}) ` : ""}${(k.text || "").slice(0, 150)}\n`;
+      for (const k of knowledges) md += `- ${(k.text || "").slice(0, 150)}\n`;
       md += "\n";
     }
     if (!experiences.length && !knowledges.length) md += "_No activity today_\n";
@@ -669,21 +672,21 @@ async function runMaintain() {
 async function exportIndex() {
   try {
     const [knowledges, experiences, entities] = await withDb(true, async (conn) => [
-      await safeQuery(conn, `MATCH (k:Knowledge) RETURN k.id AS id, k.kind AS kind, k.text AS text, k.agent AS agent, k.timestamp AS timestamp ORDER BY k.timestamp DESC`),
-      await safeQuery(conn, `MATCH (e:Experience) RETURN e.id AS id, e.type AS type, e.text AS text, e.outcome AS outcome, e.agent AS agent, e.timestamp AS timestamp ORDER BY e.timestamp DESC`),
-      await safeQuery(conn, `MATCH (e:Entity) RETURN e.id AS id, e.name AS name, e.kind AS kind, e.description AS description, e.source AS source ORDER BY e.id ASC`),
+      await safeQuery(conn, `MATCH (k:Knowledge) RETURN k.id AS id, k.text AS text, k.tags AS tags, k.agent AS agent, k.timestamp AS timestamp ORDER BY k.timestamp DESC`),
+      await safeQuery(conn, `MATCH (e:Experience) RETURN e.id AS id, e.text AS text, e.tags AS tags, e.agent AS agent, e.timestamp AS timestamp ORDER BY e.timestamp DESC`),
+      await safeQuery(conn, `MATCH (e:Entity) RETURN e.id AS id, e.name AS name, e.tags AS tags, e.description AS description, e.source AS source ORDER BY e.id ASC`),
     ]);
     let md = "";
     for (const k of knowledges) {
-      md += `## ${k.id}\nkind: ${k.kind || "fact"}\nagent: ${k.agent || ""}\ncontent: ${k.text || ""}\ntimestamp: ${k.timestamp || ""}\n\n`;
+      const tagStr = (k.tags || []).length ? `\ntags: ${k.tags.join(",")}` : "";
+      md += `## ${k.id}\ntype: knowledge\nagent: ${k.agent || ""}\ncontent: ${k.text || ""}${tagStr}\ntimestamp: ${k.timestamp || ""}\n\n`;
     }
     for (const e of experiences) {
-      md += `## ${e.id}\ntype: experience\nagent: ${e.agent || ""}\nsummary: ${e.text || ""}`;
-      if (e.outcome) md += `\noutcome: ${e.outcome}`;
-      md += `\ntimestamp: ${e.timestamp || ""}\n\n`;
+      const tagStr = (e.tags || []).length ? `\ntags: ${e.tags.join(",")}` : "";
+      md += `## ${e.id}\ntype: experience\nagent: ${e.agent || ""}\nsummary: ${e.text || ""}${tagStr}\ntimestamp: ${e.timestamp || ""}\n\n`;
     }
     for (const e of entities) {
-      md += `## ${e.id}\ntype: entity\nname: ${e.name || ""}\nkind: ${e.kind || ""}`;
+      md += `## ${e.id}\ntype: entity\nname: ${e.name || ""}`;
       if (e.description) md += `\ndescription: ${e.description}`;
       if (e.source) md += `\nsource: ${e.source}`;
       md += `\n\n`;
@@ -749,12 +752,13 @@ async function extractItemsFromFile(content, agentId) {
   const prompt = `Extract knowledge and experiences from this daily log as a JSON array.
 
 Each item must be one of:
-- {"type":"knowledge","kind":"fact|decision|thread","content":"...","entities":["topic1","topic2"]}
-- {"type":"experience","kind":"task_run|conversation","summary":"...","outcome":"success|fail|partial","entities":["project","tool"]}
+- {"type":"knowledge","text":"...","entities":["topic1","topic2"],"tags":["decision","risk","open"]}
+- {"type":"experience","text":"...","entities":["project","tool"],"tags":["success","fail","partial"]}
 
 Rules:
 - Only concrete facts, decisions, tasks — omit heartbeat/ok/trivial entries
 - entities[] must have at least one item
+- tags[] is optional — only include when classification clearly adds value
 - content/summary should be a single clear sentence
 - Return ONLY a JSON array, no explanation, no markdown
 
@@ -791,7 +795,7 @@ async function runIngest(memoryDir, threshold = 0.82) {
 
     for (const item of items) {
       try {
-        const text = item.content || item.summary || "";
+        const text = item.text || item.content || item.summary || "";
         if (!text) { errors++; continue; }
 
         const dup = await isDuplicate(text, threshold);
