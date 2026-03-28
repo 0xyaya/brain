@@ -146,7 +146,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "brain_recall": {
         const daysFlag = args.days ? `--days ${args.days}` : "";
-        result = runBrain(`recall --agent ${AGENT_ID} ${daysFlag} "${args.query.replace(/"/g, '\\"')}"`);
+        result = runBrain(`recall ${daysFlag} "${args.query.replace(/"/g, '\\"')}"`);
         break;
       }
 
@@ -158,7 +158,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(args.derives?.length ? { derives: args.derives } : {}),
           agent: AGENT_ID,
         };
-        result = runBrain(`push --agent ${AGENT_ID} '${JSON.stringify(payload)}'`);
+        result = runBrain(`push '${JSON.stringify(payload)}'`);
         break;
       }
 

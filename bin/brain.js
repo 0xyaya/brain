@@ -24,7 +24,6 @@ const BRAIN_DIR = process.env.BRAIN_DIR
     })();
 
 const QUEUE_PATH = path.join(BRAIN_DIR, "queue.jsonl");
-const LOCK_PATH = path.join(BRAIN_DIR, "consolidate.lock");
 const BIN_DIR = path.dirname(new URL(import.meta.url).pathname);
 
 fs.mkdirSync(BRAIN_DIR, { recursive: true });
@@ -32,42 +31,49 @@ fs.mkdirSync(BRAIN_DIR, { recursive: true });
 const cmd = process.argv[2];
 const args = process.argv.slice(3);
 
-function resolveAgentId(flags = {}) {
-  if (flags.agent) return flags.agent;
+// Agent ID: env → config → cwd basename (default for new projects)
+function resolveAgentId() {
   if (process.env.BRAIN_AGENT_ID) return process.env.BRAIN_AGENT_ID;
   const cfg = loadConfig(BRAIN_DIR);
   if (cfg.agentId) return cfg.agentId;
-  return null;
+  return path.basename(process.cwd());
 }
 
-function resolveCorpusRoot(flags = {}) {
+// Daily logs dir: env → config → BRAIN_DIR/memory
+function resolveDailyDir() {
+  if (process.env.BRAIN_DAILY_DIR) return process.env.BRAIN_DAILY_DIR;
   const cfg = loadConfig(BRAIN_DIR);
-  const root = process.env.BRAIN_CORPUS_ROOT || cfg.corpusRoot || path.join(os.homedir(), ".brain", "agents");
-  return root.replace("~", os.homedir());
+  if (cfg.dailyDir) return cfg.dailyDir.replace("~", os.homedir());
+  return path.join(BRAIN_DIR, "memory");
 }
 
 if (cmd === "--help" || cmd === "-h" || !cmd) {
   console.log(`brain — agent memory CLI
 
 Usage:
-  brain init [--agent <id>] [--corpus <path>]
-  brain push [--buffer <file>] [--agent <id>] <json>    Queue a knowledge/experience item
-  brain push --graph <file> [--agent <id>]               Queue entity/relationship graph
-  brain flush                                            Flush shared queue.jsonl to graph
-  brain flush --buffer <file>                            Flush a specific buffer file to graph
-  brain recall [--buffer <file>] [--agent <id>] [--days N] <query>
-  brain explore <entity>
-  brain get <id>
-  brain remove <id>                                      Delete a node by ID (+ removes embedding)
-  brain consolidate [--agent <id>] [--flags]             Update MEMORY.md sections
+  brain init                                             Initialize for this directory
+  brain push [--buffer <file>] <json>                   Queue a knowledge/experience item
+  brain push --graph <file>                             Queue a persona graph file
+  brain flush [--buffer <file>]                         Flush queue to graph
+  brain recall [--buffer <file>] [--days N] <query>    Hybrid semantic + graph search
+  brain explore <entity>                                Graph neighborhood of an entity
+  brain get <id>                                        Fetch full node by ID
+  brain remove <id>                                     Delete a node
+  brain consolidate [--flags]                           Update MEMORY.md
+  brain ingest [--dir <path>]                          Extract knowledge from daily logs
 
 Consolidate flags:
-  --focus       Update MEMORY.md focus section
-  --recent      Update MEMORY.md recent section
-  --permanent   LLM-summarize top knowledge into permanent section
-  --daily       Write daily log file
-  --maintain    Prune old experiences, strengthen edges
-  --embed       Backfill vector embeddings for existing nodes`);
+  --focus       Update focus section (centrality × recency)
+  --recent      Update recent section (last 72h)
+  --permanent   LLM synthesize top nodes into permanent section
+  --summarize   LLM summarize top entity clusters
+  --maintain    Decay edge weights, purge isolated nodes
+  --embed       Backfill vector embeddings
+
+Environment:
+  BRAIN_DIR         DB, queue, embeddings (default: ~/.brain)
+  BRAIN_AGENT_ID    Override agent ID (default: current directory name)
+  BRAIN_DAILY_DIR   Override daily logs directory (default: BRAIN_DIR/memory)`);
   process.exit(0);
 }
 
@@ -83,10 +89,10 @@ function parseFlags(args) {
       flags.source = args[++i];
     } else if (args[i] === "--days" && args[i + 1]) {
       flags.days = args[++i];
-    } else if (args[i] === "--agent" && args[i + 1]) {
-      flags.agent = args[++i];
-    } else if (args[i] === "--corpus" && args[i + 1]) {
-      flags.corpus = args[++i];
+    } else if (args[i] === "--dir" && args[i + 1]) {
+      flags.dir = args[++i];
+    } else if (args[i] === "--threshold" && args[i + 1]) {
+      flags.threshold = args[++i];
     } else {
       rest.push(args[i]);
     }
@@ -94,13 +100,11 @@ function parseFlags(args) {
   return { flags, rest };
 }
 
-function spawnConsolidate(agentId, ...spawnArgs) {
-  const env = { ...process.env };
-  if (agentId) env.BRAIN_AGENT_ID = agentId;
+function spawnConsolidate(...spawnArgs) {
   const child = spawn("node", [path.join(BIN_DIR, "consolidate.js"), ...spawnArgs], {
     detached: true,
     stdio: "ignore",
-    env,
+    env: { ...process.env },
   });
   child.unref();
 }
@@ -109,36 +113,51 @@ switch (cmd) {
   case "push": {
     const { flags, rest } = parseFlags(args);
 
-    // Handle --graph flag: import entity/relationship JSON
     if (flags.graph) {
       if (!fs.existsSync(flags.graph)) {
         console.error("Graph file not found:", flags.graph);
         process.exit(1);
       }
       const data = JSON.parse(fs.readFileSync(flags.graph, "utf-8"));
-      const item = { type: "graph_import", data, timestamp: new Date().toISOString(), ...(flags.source && { source: flags.source }) };
+      const agentId = resolveAgentId();
+      // Support new-style {nodes:[]} and legacy flat array
+      const nodes = data.nodes || (Array.isArray(data) ? data : null);
+      if (!nodes) {
+        console.error("Invalid graph file: expected {nodes:[...]}");
+        process.exit(1);
+      }
       const target = flags.buffer || QUEUE_PATH;
       if (flags.buffer) fs.mkdirSync(path.dirname(flags.buffer), { recursive: true });
-      fs.appendFileSync(target, JSON.stringify(item) + "\n");
-      console.log("OK");
+      let count = 0;
+      for (const node of nodes) {
+        const item = { ...node, agent: agentId, timestamp: new Date().toISOString() };
+        fs.appendFileSync(target, JSON.stringify(item) + "\n");
+        count++;
+      }
+      console.log(`OK — queued ${count} nodes`);
       break;
     }
 
     let json = rest.join(" ");
     if (!json) json = fs.readFileSync(0, "utf-8").trim();
     if (!json) {
-      console.error("Usage: brain push [--buffer <file>] [--graph <file>] <json>");
+      console.error("Usage: brain push [--buffer <file>] <json>");
       process.exit(1);
     }
 
-    try { JSON.parse(json); } catch {
+    let item;
+    try { item = JSON.parse(json); } catch {
       console.error("Invalid JSON:", json.slice(0, 100));
       process.exit(1);
     }
 
+    // Inject agent if not present
+    if (!item.agent) item.agent = resolveAgentId();
+    if (!item.timestamp) item.timestamp = new Date().toISOString();
+
     const target = flags.buffer || QUEUE_PATH;
     if (flags.buffer) fs.mkdirSync(path.dirname(flags.buffer), { recursive: true });
-    fs.appendFileSync(target, json + "\n");
+    fs.appendFileSync(target, JSON.stringify(item) + "\n");
     console.log("OK");
     break;
   }
@@ -150,7 +169,7 @@ switch (cmd) {
       console.error("Buffer file not found:", flags.buffer);
       process.exit(1);
     }
-    spawnConsolidate(resolveAgentId(flags), "--input", inputFile);
+    spawnConsolidate("--input", inputFile);
     console.log("OK");
     break;
   }
@@ -160,12 +179,11 @@ switch (cmd) {
     const query = rest.join(" ");
 
     if (!query) {
-      console.error("Usage: brain recall [--buffer <file>] <query>");
+      console.error("Usage: brain recall [--buffer <file>] [--days N] <query>");
       process.exit(1);
     }
 
     if (flags.buffer) {
-      // Text search over raw buffer file
       if (!fs.existsSync(flags.buffer)) { console.log("[]"); break; }
       const lines = fs.readFileSync(flags.buffer, "utf-8").trim().split("\n").filter(Boolean);
       const queryLower = query.toLowerCase();
@@ -174,142 +192,132 @@ switch (cmd) {
         try {
           const item = JSON.parse(line);
           if (JSON.stringify(item).toLowerCase().includes(queryLower)) matches.push(item);
-        } catch { /* skip bad lines */ }
+        } catch { /* skip */ }
       }
       console.log(JSON.stringify(matches.slice(0, 5)));
-    } else {
-      const { getDb, closeDb } = await import("../src/db.js");
-      const { embed, cosine, loadEmbeddings } = await import("../src/embed.js");
-      const results = [];
-
-      // 1. Vector search over graph using embeddings.json
-      try {
-        const queryVec = await embed(query);
-        if (queryVec) {
-          const store = loadEmbeddings();
-          const nodeIds = Object.keys(store);
-          if (nodeIds.length > 0) {
-            const scored = nodeIds
-              .map(id => ({ id, score: cosine(queryVec, store[id]) }))
-              .sort((a, b) => b.score - a.score);
-
-            const conn = await getDb(false); // write access needed for boosts
-            const recallAgent = flags.agent || resolveAgentId(flags);
-            const seenIds = new Set();
-
-            // --- Vector results ---
-            const vectorHits = [];
-            for (const { id, score } of scored.slice(0, 10)) {
-              if (score < 0.3) break;
-              try {
-                const table = id.startsWith("entity:") ? "Entity"
-                  : id.startsWith("know:") ? "Knowledge" : "Experience";
-                const agentFilter = (table !== "Entity" && recallAgent)
-                  ? ` WHERE n.agent = '${recallAgent}'` : "";
-                const rows = await (await conn.query(
-                  `MATCH (n:${table} {id: '${id}'})${agentFilter} RETURN n.text AS text, n.tags AS tags, n.agent AS agent`
-                )).getAll();
-                if (rows[0]) {
-                  seenIds.add(id);
-                  vectorHits.push({
-                    source: "graph",
-                    id,
-                    type: table.toLowerCase(),
-                    text: (rows[0].text || "").slice(0, 200),
-                    tags: rows[0].tags || [],
-                    agent: rows[0].agent || null,
-                    score: Math.round(score * 100) / 100,
-                  });
-                  // Boost edge weights on recalled nodes (LTP)
-                  try {
-                    await conn.query(
-                      `MATCH (n:${table} {id: '${id}'})-[r]-(:Entity)
-                       SET r.weight = CASE WHEN r.weight < 4.9 THEN r.weight + 0.1 ELSE 5.0 END`
-                    );
-                  } catch { /* no edges yet */ }
-                }
-              } catch { /* skip */ }
-            }
-
-            // --- Graph expansion: siblings sharing entities with top vector hits ---
-            // Find entities connected to each hit → find other nodes connected to same entities
-            const graphHits = [];
-            for (const hit of vectorHits.slice(0, 5)) {
-              const table = hit.id.startsWith("know:") ? "Knowledge" : "Experience";
-              const edgeRel = table === "Knowledge" ? "ABOUT" : "INVOLVES";
-              const sibRel  = table === "Knowledge" ? "ABOUT" : "INVOLVES";
-              try {
-                // Step 1: get entities of this hit
-                const entities = await (await conn.query(`
-                  MATCH (n:${table} {id: '${hit.id}'})-[r:${edgeRel}]->(e:Entity)
-                  RETURN e.id AS eid, r.weight AS w
-                `)).getAll();
-                if (!entities.length) continue;
-                const eids = entities.map(e => `'${e.eid}'`).join(",");
-
-                // Step 2: find other Knowledge/Experience nodes sharing those entities
-                for (const sibTable of ["Knowledge", "Experience"]) {
-                  const sRel = sibTable === "Knowledge" ? "ABOUT" : "INVOLVES";
-                  const agentF = recallAgent ? ` AND sib.agent = '${recallAgent}'` : "";
-                  const sibs = await (await conn.query(`
-                    MATCH (sib:${sibTable})-[r:${sRel}]->(e:Entity)
-                    WHERE e.id IN [${eids}] AND sib.id <> '${hit.id}'${agentF}
-                    WITH sib, SUM(r.weight) AS sharedWeight
-                    RETURN sib.id AS id, sib.text AS text, sib.agent AS agent, sharedWeight
-                    ORDER BY sharedWeight DESC LIMIT 3
-                  `)).getAll();
-                  for (const sib of sibs) {
-                    if (seenIds.has(sib.id) || !sib.text) continue;
-                    seenIds.add(sib.id);
-                    graphHits.push({
-                      source: "graph-neighbor",
-                      id: sib.id,
-                      type: sibTable.toLowerCase(),
-                      text: (sib.text || "").slice(0, 200),
-                      tags: [],
-                      agent: sib.agent || null,
-                      score: Math.round((hit.score * 0.6 + Math.min(sib.sharedWeight / 5.0, 1) * 0.4) * 100) / 100,
-                    });
-                  }
-                }
-              } catch { /* skip */ }
-            }
-
-            results.push(...vectorHits, ...graphHits);
-            await closeDb();
-          }
-        }
-      } catch { /* embedding unavailable — silent fallback */ }
-
-      // 2. Keyword search over recent daily memory logs
-      const days = flags.days ? parseInt(flags.days) : 3;
-      const agentId = resolveAgentId(flags);
-      const corpusRoot = resolveCorpusRoot(flags);
-      const dailyDir = agentId ? path.join(corpusRoot, agentId, "memory") : null;
-      const queryLower = query.toLowerCase();
-      try {
-        if (!dailyDir) throw new Error("no dailyDir");
-        const now = new Date();
-        for (let i = 0; i < days; i++) {
-          const d = new Date(now);
-          d.setDate(d.getDate() - i);
-          const dateStr = d.toISOString().slice(0, 10);
-          const logPath = path.join(dailyDir, `${dateStr}.md`);
-          if (!fs.existsSync(logPath)) continue;
-          const content = fs.readFileSync(logPath, "utf-8");
-          if (!content.toLowerCase().includes(queryLower)) continue;
-          const paras = content.split(/\n{2,}/);
-          for (const para of paras) {
-            if (para.toLowerCase().includes(queryLower)) {
-              results.push({ source: "daily", date: dateStr, text: para.trim().slice(0, 300) });
-              if (results.filter(r => r.source === "daily").length >= 3) break;
-            }
-          }
-        }
-      } catch { /* no daily dir */ }
-
-      console.log(JSON.stringify(results.slice(0, 10)));
+      break;
     }
+
+    const { getDb, closeDb } = await import("../src/db.js");
+    const { embed, cosine, loadEmbeddings } = await import("../src/embed.js");
+    const results = [];
+    const agentId = resolveAgentId();
+
+    // 1. Vector search + graph expansion
+    try {
+      const queryVec = await embed(query);
+      if (queryVec) {
+        const store = loadEmbeddings();
+        const nodeIds = Object.keys(store);
+        if (nodeIds.length > 0) {
+          const scored = nodeIds
+            .map(id => ({ id, score: cosine(queryVec, store[id]) }))
+            .sort((a, b) => b.score - a.score);
+
+          const conn = await getDb(false);
+          const seenIds = new Set();
+          const vectorHits = [];
+
+          for (const { id, score } of scored.slice(0, 10)) {
+            if (score < 0.3) break;
+            try {
+              const table = id.startsWith("entity:") ? "Entity"
+                : id.startsWith("know:") ? "Knowledge" : "Experience";
+              const agentFilter = (table !== "Entity" && agentId)
+                ? ` WHERE n.agent = '${agentId}'` : "";
+              const rows = await (await conn.query(
+                `MATCH (n:${table} {id: '${id}'})${agentFilter} RETURN n.text AS text, n.agent AS agent`
+              )).getAll();
+              if (rows[0]) {
+                seenIds.add(id);
+                vectorHits.push({
+                  source: "graph",
+                  id,
+                  type: table.toLowerCase(),
+                  text: (rows[0].text || "").slice(0, 200),
+                  agent: rows[0].agent || null,
+                  score: Math.round(score * 100) / 100,
+                });
+                try {
+                  await conn.query(
+                    `MATCH (n:${table} {id: '${id}'})-[r]-(:Entity)
+                     SET r.weight = CASE WHEN r.weight < 4.9 THEN r.weight + 0.1 ELSE 5.0 END`
+                  );
+                } catch { /* no edges */ }
+              }
+            } catch { /* skip */ }
+          }
+
+          // Graph expansion: siblings sharing entities
+          const graphHits = [];
+          for (const hit of vectorHits.slice(0, 5)) {
+            const table = hit.id.startsWith("know:") ? "Knowledge" : "Experience";
+            const edgeRel = table === "Knowledge" ? "ABOUT" : "INVOLVES";
+            try {
+              const entities = await (await conn.query(`
+                MATCH (n:${table} {id: '${hit.id}'})-[r:${edgeRel}]->(e:Entity)
+                RETURN e.id AS eid, r.weight AS w
+              `)).getAll();
+              if (!entities.length) continue;
+              const eids = entities.map(e => `'${e.eid}'`).join(",");
+
+              for (const sibTable of ["Knowledge", "Experience"]) {
+                const sRel = sibTable === "Knowledge" ? "ABOUT" : "INVOLVES";
+                const agentF = agentId ? ` AND sib.agent = '${agentId}'` : "";
+                const sibs = await (await conn.query(`
+                  MATCH (sib:${sibTable})-[r:${sRel}]->(e:Entity)
+                  WHERE e.id IN [${eids}] AND sib.id <> '${hit.id}'${agentF}
+                  WITH sib, SUM(r.weight) AS sharedWeight
+                  RETURN sib.id AS id, sib.text AS text, sib.agent AS agent, sharedWeight
+                  ORDER BY sharedWeight DESC LIMIT 3
+                `)).getAll();
+                for (const sib of sibs) {
+                  if (seenIds.has(sib.id) || !sib.text) continue;
+                  seenIds.add(sib.id);
+                  graphHits.push({
+                    source: "graph-neighbor",
+                    id: sib.id,
+                    type: sibTable.toLowerCase(),
+                    text: (sib.text || "").slice(0, 200),
+                    agent: sib.agent || null,
+                    score: Math.round((hit.score * 0.6 + Math.min(sib.sharedWeight / 5.0, 1) * 0.4) * 100) / 100,
+                  });
+                }
+              }
+            } catch { /* skip */ }
+          }
+
+          results.push(...vectorHits, ...graphHits);
+          await closeDb();
+        }
+      }
+    } catch { /* embedding unavailable */ }
+
+    // 2. Keyword search over daily logs
+    const days = flags.days ? parseInt(flags.days) : 3;
+    const dailyDir = resolveDailyDir();
+    const queryLower = query.toLowerCase();
+    try {
+      const now = new Date();
+      for (let i = 0; i < days; i++) {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        const dateStr = d.toISOString().slice(0, 10);
+        const logPath = path.join(dailyDir, `${dateStr}.md`);
+        if (!fs.existsSync(logPath)) continue;
+        const content = fs.readFileSync(logPath, "utf-8");
+        if (!content.toLowerCase().includes(queryLower)) continue;
+        const paras = content.split(/\n{2,}/);
+        for (const para of paras) {
+          if (para.toLowerCase().includes(queryLower)) {
+            results.push({ source: "daily", date: dateStr, text: para.trim().slice(0, 300) });
+            if (results.filter(r => r.source === "daily").length >= 3) break;
+          }
+        }
+      }
+    } catch { /* no daily dir */ }
+
+    console.log(JSON.stringify(results.slice(0, 10)));
     break;
   }
 
@@ -324,26 +332,20 @@ switch (cmd) {
       const conn = await getDb(true);
       const results = [];
 
-      // Entities connected to this entity
       const eStmt = await conn.prepare(
         `MATCH (e:Entity {name: $name})-[r*1..2]-(n:Entity) RETURN DISTINCT n.id AS id, n.name AS name, 'entity' AS type LIMIT 10`
       );
-      const eRows = await (await conn.execute(eStmt, { name: entity })).getAll();
-      results.push(...eRows);
+      results.push(...await (await conn.execute(eStmt, { name: entity })).getAll());
 
-      // Knowledge nodes ABOUT this entity
       const kStmt = await conn.prepare(
         `MATCH (k:Knowledge)-[:ABOUT]->(e:Entity {name: $name}) RETURN k.id AS id, k.text AS name, 'knowledge' AS type LIMIT 10`
       );
-      const kRows = await (await conn.execute(kStmt, { name: entity })).getAll();
-      results.push(...kRows);
+      results.push(...await (await conn.execute(kStmt, { name: entity })).getAll());
 
-      // Experiences INVOLVING this entity
       const xStmt = await conn.prepare(
         `MATCH (x:Experience)-[:INVOLVES]->(e:Entity {name: $name}) RETURN x.id AS id, x.text AS name, 'experience' AS type LIMIT 10`
       );
-      const xRows = await (await conn.execute(xStmt, { name: entity })).getAll();
-      results.push(...xRows);
+      results.push(...await (await conn.execute(xStmt, { name: entity })).getAll());
 
       console.log(JSON.stringify(results));
       await closeDb();
@@ -355,24 +357,20 @@ switch (cmd) {
 
   case "get": {
     const id = args[0];
-    if (!id) {
-      console.error("Usage: brain get <id>");
-      process.exit(1);
-    }
+    if (!id) { console.error("Usage: brain get <id>"); process.exit(1); }
     const { getDb, closeDb } = await import("../src/db.js");
     try {
       const conn = await getDb(true);
       for (const table of ["Experience", "Knowledge", "Entity"]) {
         try {
           const stmt = await conn.prepare(`MATCH (n:${table} {id: $id}) RETURN n.*`);
-          const result = await conn.execute(stmt, { id });
-          const rows = await result.getAll();
+          const rows = await (await conn.execute(stmt, { id })).getAll();
           if (rows.length > 0) {
             console.log(JSON.stringify({ type: table, ...rows[0] }));
             await closeDb();
             process.exit(0);
           }
-        } catch { /* try next table */ }
+        } catch { /* try next */ }
       }
       console.log("null");
       await closeDb();
@@ -384,10 +382,7 @@ switch (cmd) {
 
   case "remove": {
     const id = args[0];
-    if (!id) {
-      console.error("Usage: brain remove <id>");
-      process.exit(1);
-    }
+    if (!id) { console.error("Usage: brain remove <id>"); process.exit(1); }
     const { getDb, closeDb } = await import("../src/db.js");
     const { loadEmbeddings, saveEmbeddings } = await import("../src/embed.js");
     let deleted = false;
@@ -406,7 +401,6 @@ switch (cmd) {
       }
       await closeDb();
       if (!deleted) { console.log(`Not found: ${id}`); process.exit(1); }
-      // Remove embedding
       const store = loadEmbeddings();
       if (store[id]) {
         delete store[id];
@@ -422,50 +416,37 @@ switch (cmd) {
   }
 
   case "consolidate": {
-    const { flags: cFlags } = parseFlags(args);
     const consolidateFlags = args.filter(a => a.startsWith("--"));
-    // Default: update focus + recent sections
     if (consolidateFlags.length === 0) consolidateFlags.push("--focus", "--recent");
-    spawnConsolidate(resolveAgentId(cFlags), ...consolidateFlags);
+    spawnConsolidate(...consolidateFlags);
     console.log("OK — consolidate spawned with: " + consolidateFlags.join(" "));
     break;
   }
 
   case "ingest": {
     const { flags: iFlags } = parseFlags(args);
-    const agentId = resolveAgentId(iFlags);
     const ingestArgs = ["--ingest"];
     if (iFlags.dir) ingestArgs.push("--ingest-dir", path.resolve(iFlags.dir.replace("~", os.homedir())));
     if (iFlags.threshold) ingestArgs.push("--threshold", iFlags.threshold);
-    spawnConsolidate(agentId, ...ingestArgs);
-    console.log(`OK — ingest spawned for agent: ${agentId}`);
+    spawnConsolidate(...ingestArgs);
+    console.log("OK — ingest spawned");
     break;
   }
 
   case "init": {
-    const { flags: initFlags } = parseFlags(args);
-    const agentId = initFlags.agent || process.env.BRAIN_AGENT_ID;
-    const corpusRoot = initFlags.corpus
-      ? path.resolve(initFlags.corpus.replace("~", os.homedir()))
-      : path.join(os.homedir(), ".brain", "agents");
+    const agentId = resolveAgentId();
+    const dailyDir = path.join(BRAIN_DIR, "memory");
 
-    if (!agentId) {
-      console.error("Error: agent ID required. Use --agent <id> (e.g. brain init --agent myagent)");
-      process.exit(1);
-    }
-
-    const memoryDir = path.join(corpusRoot, agentId, "memory");
-    const userDir = path.join(corpusRoot, agentId);
     fs.mkdirSync(BRAIN_DIR, { recursive: true });
-    fs.mkdirSync(memoryDir, { recursive: true });
+    fs.mkdirSync(dailyDir, { recursive: true });
 
     const configPath = path.join(BRAIN_DIR, "config.json");
-    const config = { ...loadConfig(BRAIN_DIR), agentId, corpusRoot };
+    const config = { ...loadConfig(BRAIN_DIR), agentId };
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 
-    const memoryMdPath = path.join(userDir, "MEMORY.md");
+    const memoryMdPath = path.join(BRAIN_DIR, "MEMORY.md");
     if (!fs.existsSync(memoryMdPath)) {
-      fs.writeFileSync(memoryMdPath, `# MEMORY.md — Long-term Memory
+      fs.writeFileSync(memoryMdPath, `# MEMORY.md — ${agentId}
 
 <!-- BRAIN:FOCUS:START -->
 # Focus
@@ -479,20 +460,19 @@ switch (cmd) {
 # Permanent
 <!-- BRAIN:PERMANENT:END -->
 `);
-      console.log(`  created ${memoryMdPath}`);
     }
 
     console.log(`✓ Brain initialized`);
     console.log(`  agent:      ${agentId}`);
     console.log(`  brain DB:   ${BRAIN_DIR}`);
-    console.log(`  memory:     ${memoryDir}`);
-    console.log(`  config:     ${configPath}`);
+    console.log(`  memory:     ${dailyDir}`);
+    console.log(`  MEMORY.md:  ${memoryMdPath}`);
     console.log(``);
     console.log(`Next steps:`);
-    console.log(`  1. brain flush                          # flush any pending queue items`);
-    console.log(`  2. brain consolidate --agent ${agentId} --focus --recent  # update MEMORY.md`);
-    console.log(`  3. brain consolidate --agent ${agentId} --embed           # build vector index`);
-    console.log(`  4. brain recall --agent ${agentId} "test query"           # verify search works`);
+    console.log(`  brain push '{"type":"knowledge","text":"...","entities":["topic"]}'`);
+    console.log(`  brain flush`);
+    console.log(`  brain consolidate --embed`);
+    console.log(`  brain recall "test query"`);
     break;
   }
 

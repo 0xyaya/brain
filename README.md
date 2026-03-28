@@ -32,7 +32,7 @@ Experience -[DERIVED]->  Knowledge
 
 ```bash
 npm install -g brain-plugin
-brain init --agent myagent
+cd myproject && brain init
 ```
 
 Or from source:
@@ -40,7 +40,7 @@ Or from source:
 ```bash
 git clone https://github.com/0xyaya/brain
 cd brain && npm install && npm link
-brain init --agent myagent
+cd myproject && brain init
 ```
 
 ---
@@ -72,6 +72,7 @@ Returns nodes ranked by vector score × edge weight. The more a node is recalled
 ## CLI
 
 ```bash
+brain init                     # Initialize for this directory
 brain push     <json>          # Queue a memory item
 brain flush                    # Write queue to graph
 brain recall   <query>         # Hybrid semantic + graph search
@@ -81,7 +82,7 @@ brain remove   <id>            # Delete a node
 brain consolidate [--flags]    # Rebuild MEMORY.md
 ```
 
-All commands accept `--agent <id>` for multi-agent setups.
+Override the agent ID via `BRAIN_AGENT_ID` env var, or use `BRAIN_DIR` for full isolation.
 
 ---
 
@@ -125,7 +126,7 @@ Works with Claude Desktop, Cursor, or any MCP client:
     "brain": {
       "command": "node",
       "args": ["/path/to/brain/src/mcp.js"],
-      "env": { "BRAIN_AGENT_ID": "myagent" }
+      "env": { "BRAIN_DIR": "/path/to/project/.brain" }
     }
   }
 }
