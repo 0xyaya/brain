@@ -5,7 +5,7 @@ import path from "path";
 import { spawn } from "child_process";
 
 // --- Config resolution ---
-const DEFAULT_BRAIN_DIR = path.join(os.homedir(), "corpus", "brain");
+const DEFAULT_BRAIN_DIR = path.join(os.homedir(), ".brain");
 
 function loadConfig(brainDir = DEFAULT_BRAIN_DIR) {
   try {
@@ -42,7 +42,7 @@ function resolveAgentId(flags = {}) {
 
 function resolveCorpusRoot(flags = {}) {
   const cfg = loadConfig(BRAIN_DIR);
-  const root = process.env.BRAIN_CORPUS_ROOT || cfg.corpusRoot || path.join(os.homedir(), "corpus");
+  const root = process.env.BRAIN_CORPUS_ROOT || cfg.corpusRoot || path.join(os.homedir(), ".brain", "agents");
   return root.replace("~", os.homedir());
 }
 
@@ -285,7 +285,7 @@ switch (cmd) {
       const days = flags.days ? parseInt(flags.days) : 3;
       const agentId = resolveAgentId(flags);
       const corpusRoot = resolveCorpusRoot(flags);
-      const dailyDir = agentId ? path.join(corpusRoot, "users", agentId, "memory") : null;
+      const dailyDir = agentId ? path.join(corpusRoot, agentId, "memory") : null;
       const queryLower = query.toLowerCase();
       try {
         if (!dailyDir) throw new Error("no dailyDir");
@@ -447,15 +447,15 @@ switch (cmd) {
     const agentId = initFlags.agent || process.env.BRAIN_AGENT_ID;
     const corpusRoot = initFlags.corpus
       ? path.resolve(initFlags.corpus.replace("~", os.homedir()))
-      : path.join(os.homedir(), "corpus");
+      : path.join(os.homedir(), ".brain", "agents");
 
     if (!agentId) {
       console.error("Error: agent ID required. Use --agent <id> (e.g. brain init --agent myagent)");
       process.exit(1);
     }
 
-    const memoryDir = path.join(corpusRoot, "users", agentId, "memory");
-    const userDir = path.join(corpusRoot, "users", agentId);
+    const memoryDir = path.join(corpusRoot, agentId, "memory");
+    const userDir = path.join(corpusRoot, agentId);
     fs.mkdirSync(BRAIN_DIR, { recursive: true });
     fs.mkdirSync(memoryDir, { recursive: true });
 

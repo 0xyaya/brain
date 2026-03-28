@@ -6,7 +6,7 @@
  *   - 384 dimensions, fast on CPU
  *   - No API key, no server, no subscription
  *
- * Embeddings are stored in ~/corpus/brain/embeddings.json
+ * Embeddings are stored in ~/.brain/embeddings.json
  * (outside LadybugDB to avoid column type conflicts)
  */
 
@@ -17,7 +17,7 @@ import os from "os";
 const EMBEDDINGS_PATH = path.join(
   process.env.BRAIN_DIR
     ? path.resolve(process.env.BRAIN_DIR)
-    : path.join(os.homedir(), "corpus", "brain"),
+    : path.join(os.homedir(), ".brain"),
   "embeddings.json"
 );
 

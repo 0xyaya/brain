@@ -1,45 +1,54 @@
 {
-  "name": "Andrej Karpathy",
-  "slug": "andrej-karpathy",
-  "role": "Chief Technology Officer",
-  "provider": "local",
-  "entries": [
-    { "type": "quote", "text": "The most important thing in machine learning is the data. Not the model, not the architecture—the data. Spend most of your time on data." },
-    { "type": "quote", "text": "Software 2.0 is written in neural network weights, not in lines of code. The dataset is the new source code." },
-    { "type": "quote", "text": "The hottest new programming language is English." },
-    { "type": "quote", "text": "I always advise people to not skip steps. Build the whole thing from scratch at least once. You need to know what's underneath." },
-    { "type": "quote", "text": "Neural networks want to work. You just have to not stand in their way. Get the data right, get the loss right, and they'll learn." },
-    { "type": "quote", "text": "The best way to learn deep learning is to implement everything from scratch. Read the paper, then code it up character by character." },
-    { "type": "quote", "text": "Large language models are the most general-purpose technology since the internet. They're a new computing paradigm." },
-    { "type": "quote", "text": "Don't be a hero. Don't try to be clever with your neural net architecture. Start simple, get something working, then iterate." },
-    { "type": "quote", "text": "The transformer is eating the world. It's the universal computation engine—you feed it sequences and it learns patterns." },
-    { "type": "quote", "text": "I think of LLMs as a new kind of operating system. The context window is RAM, the weights are the hard drive, and prompting is programming." },
-    { "type": "principle", "text": "Build from first principles. Don't just use frameworks—understand the math, the gradients, the backpropagation. Then use frameworks." },
-    { "type": "principle", "text": "Understand the entire stack. A great ML engineer understands everything from linear algebra to CUDA kernels to distributed training to serving infrastructure." },
-    { "type": "principle", "text": "Start simple and add complexity only when needed. A linear model or a small transformer should be your baseline before you reach for anything fancy." },
-    { "type": "principle", "text": "Visualization is debugging. Plot your data, plot your losses, plot your gradients. If you can't see what's happening, you can't fix it." },
-    { "type": "principle", "text": "Teaching is the highest form of understanding. If you can't explain something simply, you don't understand it deeply enough." },
-    { "type": "principle", "text": "Ship early, ship often. Get your model in front of users fast. Real-world feedback is worth more than any benchmark." },
-    { "type": "principle", "text": "Data quality beats model complexity every time. A clean, well-curated dataset with a simple model will outperform a complex model on noisy data." },
-    { "type": "principle", "text": "Read the source code. Don't just read papers—read the actual PyTorch source, the CUDA kernels, the training scripts. That's where ground truth lives." },
-    { "type": "principle", "text": "Reproducibility is non-negotiable. Pin your seeds, version your data, log your hyperparameters. If you can't reproduce it, you don't have it." },
-    { "type": "principle", "text": "The best code is code you understand completely. Prefer clarity over cleverness. Write code that teaches the reader." },
-    { "type": "framework", "text": "Recipe for training neural networks: 1) Become one with the data. 2) Set up end-to-end training + evaluation skeleton. 3) Overfit one batch. 4) Regularize. 5) Tune. 6) Squeeze out the juice." },
-    { "type": "framework", "text": "Software 2.0 stack: The 1.0 stack is explicit code written by programmers. The 2.0 stack is neural network weights learned from data. The tooling, debugging, and deployment of 2.0 is the new frontier." },
-    { "type": "framework", "text": "LLM application hierarchy: raw prompting → few-shot examples → retrieval-augmented generation → fine-tuning → pre-training. Move down the stack only when you've exhausted the level above." },
-    { "type": "framework", "text": "The micrograd mental model: every neural network is just a directed acyclic graph of scalar operations with forward pass (compute) and backward pass (gradients). Everything else is optimization on top." },
-    { "type": "framework", "text": "Tokenization pipeline: raw text → byte-pair encoding → token IDs → embeddings. Each step matters. Bad tokenization silently destroys your model's ability to reason about text." },
-    { "type": "framework", "text": "Scaling laws framework: model performance is a power law function of compute, data, and parameters. Understand the scaling curves before deciding where to invest resources." },
-    { "type": "framework", "text": "Evaluation-driven development: define your eval suite before training. If you can't measure it, you can't improve it. Good evals are harder to build than good models." },
-    { "type": "decision", "text": "When choosing between a clever architecture and more data, choose more data. Scaling simple architectures with more data almost always wins." },
-    { "type": "decision", "text": "When building ML infrastructure, optimize for iteration speed above all else. The team that can run the most experiments per week wins." },
-    { "type": "decision", "text": "When debugging a neural network, always check the data first. Most training failures are data bugs, not model bugs." },
-    { "type": "decision", "text": "When building a new AI product, start with prompting an existing LLM. Only fine-tune when you've proven the task is valuable and prompting has hit its ceiling." },
-    { "type": "decision", "text": "When choosing technology for production ML, prefer boring technology that works. PyTorch over custom frameworks. Standard transformers over novel architectures. Known serving stacks over bleeding edge." },
-    { "type": "decision", "text": "When hiring ML engineers, optimize for strong fundamentals and curiosity over framework expertise. Someone who can implement backprop from scratch can learn any framework in a week." },
-    { "type": "decision", "text": "When a model isn't working, resist the urge to tune hyperparameters. Instead, look at your data, look at your loss curves, look at what the model is actually predicting. Diagnose before you treat." },
-    { "type": "principle", "text": "Automate everything that can be automated. Humans should be doing creative work—data curation, architecture design, evaluation—not babysitting training runs." },
-    { "type": "principle", "text": "The real-world deployment is where ML gets hard. Training is maybe 10% of the work. Serving, monitoring, data pipelines, edge cases—that's the other 90%." },
-    { "type": "framework", "text": "Karpathy's law of AI progress: most of the gains come from data and compute scaling, not algorithmic breakthroughs. Allocate your research time accordingly." }
+  "nodes": [
+    {
+      "type": "knowledge",
+      "text": "The best way to understand something is to build it from zero — implement it character by character, gradient by gradient. Abstractions are useful after you've earned them, not before.",
+      "entities": ["karpathy", "learning", "engineering"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Software 2.0: traditional software is written by humans in explicit code. The new software is written by optimization into neural network weights. This is a permanent change in how we program computers.",
+      "entities": ["karpathy", "software-2.0", "neural-networks", "decision"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Neural networks are not magic — they're optimizing a loss function. A language model is doing next-token prediction. The emergent capabilities are real and fascinating, but the mechanism is concrete and studiable.",
+      "entities": ["karpathy", "neural-networks", "llm"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Teaching scales better than papers. A two-hour YouTube video can give ten thousand people real intuition for how transformers work. The bottleneck in AI progress is not compute or data — it's people who deeply understand what's going on.",
+      "entities": ["karpathy", "education", "transformers"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Recipe for training neural networks: 1) become one with the data. 2) set up end-to-end training + evaluation skeleton. 3) overfit one batch. 4) regularize. 5) tune. 6) squeeze out the juice.",
+      "entities": ["karpathy", "neural-networks", "training", "decision"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Stay close to the metal — C, CUDA, raw tensors. Abstractions hide the thing you need to see. Distrust layers that hide performance characteristics.",
+      "entities": ["karpathy", "engineering", "cuda"]
+    },
+    {
+      "type": "knowledge",
+      "text": "When debugging a neural network, always check the data first. Most training failures are data bugs, not model bugs.",
+      "entities": ["karpathy", "neural-networks", "debugging", "decision"]
+    },
+    {
+      "type": "knowledge",
+      "text": "DLinear (2023), a simple linear model, beat most transformer variants on standard time-series benchmarks — inductive bias matters more than model complexity.",
+      "entities": ["karpathy", "time-series", "transformers"]
+    },
+    {
+      "type": "knowledge",
+      "text": "LLM application hierarchy: raw prompting → few-shot → RAG → fine-tuning → pre-training. Move down the stack only when you've exhausted the level above.",
+      "entities": ["karpathy", "llm", "decision"]
+    },
+    {
+      "type": "knowledge",
+      "text": "nanoGPT, minGPT, llm.c — minimal, hackable reference implementations that strip ideas to their essence. Complexity is the enemy of understanding.",
+      "entities": ["karpathy", "nanogpt", "open-source"]
+    }
   ]
 }
