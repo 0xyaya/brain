@@ -70,18 +70,6 @@ export async function initSchema() {
       timestamp        STRING,
       PRIMARY KEY (id)
     )`,
-    `CREATE NODE TABLE IF NOT EXISTS Summary (
-      id         STRING,
-      title      STRING,
-      content    STRING,
-      text       STRING,
-      source     STRING,
-      source_ids STRING,
-      agent      STRING,
-      created_at STRING,
-      updated_at STRING,
-      PRIMARY KEY (id)
-    )`,
   ];
 
   // Edge tables
@@ -92,7 +80,7 @@ export async function initSchema() {
     `CREATE REL TABLE IF NOT EXISTS DERIVED    (FROM Experience TO Knowledge, source STRING, weight DOUBLE DEFAULT 1.0)`,
     `CREATE REL TABLE IF NOT EXISTS RELATES_TO (FROM Knowledge TO Knowledge,  why STRING, source STRING, weight DOUBLE DEFAULT 1.0)`,
     `CREATE REL TABLE IF NOT EXISTS FOLLOWS    (FROM Experience TO Experience, source STRING, weight DOUBLE DEFAULT 1.0)`,
-    `CREATE REL TABLE IF NOT EXISTS SUMMARIZES (FROM Summary TO Entity,       source STRING)`,
+
   ];
 
   // Migrate existing tables: add new columns if missing

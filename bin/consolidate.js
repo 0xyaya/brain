@@ -222,35 +222,10 @@ async function runFocus() {
     scored.sort((a, b) => b.score - a.score);
     const top = scored.slice(0, 5);
 
-    // Fetch entity summaries for the top nodes
-    const topNodeIds = new Set(top.map(t => t.id));
-    const summaryMap = new Map(); // entityId → summary text
-    if (top.length > 0) {
-      const entityIds = [];
-      for (const [nodeId, entities] of threadEntities) {
-        if (!topNodeIds.has(nodeId)) continue;
-        for (const eid of entities) { if (eid !== agentEntityId) entityIds.push(eid); }
-      }
-      if (entityIds.length) {
-        const summaries = await withDb(true, (conn) =>
-          safeQuery(conn, `
-            MATCH (s:Summary)-[:SUMMARIZES]->(e:Entity)
-            WHERE e.id IN [${entityIds.map(id => `'${esc(id)}'`).join(",")}]
-              AND s.agent = '${esc(AGENT_ID)}'
-            RETURN e.id AS entityId, s.text AS summary
-          `)
-        );
-        for (const r of summaries) summaryMap.set(r.entityId, r.summary);
-      }
-    }
-
     let content = "# Focus\n";
     if (top.length > 0) {
       for (const t of top) {
-        const entities = [...(threadEntities.get(t.id) || [])].filter(e => e !== agentEntityId);
-        const summary = entities.map(e => summaryMap.get(e)).find(Boolean);
         content += `- ${(t.text || "").slice(0, 120)}\n`;
-        if (summary) content += `  → ${summary.slice(0, 120)}\n`;
       }
     } else {
       content += "_No open threads_\n";
@@ -266,62 +241,70 @@ async function runFocus() {
 // Fires on 6h cron alongside runPermanent.
 async function runSummarize() {
   try {
-    // One read pass: get all thread-family nodes grouped by entity
-    const rows = await withDb(true, (conn) =>
+    // Find top entities by centrality (most connected = most important topics)
+    const topEntities = await withDb(true, (conn) =>
       safeQuery(conn, `
-        MATCH (k:Knowledge)-[:ABOUT]->(e:Entity)
-        WHERE k.agent = '${esc(AGENT_ID)}'
-        RETURN e.id AS entityId, e.name AS entityName,
-               k.text AS text, k.tags AS tags, k.timestamp AS ts
-        ORDER BY e.id ASC, k.timestamp ASC
+        MATCH (e:Entity)
+        OPTIONAL MATCH ()-[r]-(e)
+        WITH e, COALESCE(SUM(r.weight), 0) + 1 AS centrality
+        WHERE centrality >= 3
+        RETURN e.id AS entityId, e.name AS entityName, centrality
+        ORDER BY centrality DESC LIMIT 10
       `)
     );
 
-    if (!rows.length) { log("Summarize: no thread entities found"); return; }
+    if (!topEntities.length) { log("Summarize: no high-centrality entities found"); return; }
 
-    // Group by entity
-    const byEntity = new Map();
-    for (const r of rows) {
-      if (!byEntity.has(r.entityId)) byEntity.set(r.entityId, { name: r.entityName, leaves: [] });
-      byEntity.get(r.entityId).leaves.push(r);
-    }
-
-    // LLM pass: build summaries (outside DB connection)
-    const summaries = [];
-    for (const [entityId, { name, leaves }] of byEntity) {
-      const history = leaves.map(l =>
-        `[${(l.ts || "").slice(0, 10)} ${l.kind}] ${(l.text || "").slice(0, 160)}`
-      ).join("\n");
-      const prompt = `Summarize the current state of this topic for an AI agent memory.\n\nEntity: ${name}\nTimeline (oldest→newest):\n${history}\n\nOne sentence (max 120 chars), current state only — what changed or remains open. No preamble:`;
-      try {
-        const out = execSync(`echo ${shellEscape(prompt)} | claude --print --permission-mode bypassPermissions`, {
-          encoding: "utf-8", timeout: 30_000, maxBuffer: 512 * 1024,
-        }).trim().slice(0, 200);
-        if (out) summaries.push({ entityId, name, summary: out });
-      } catch { /* skip failed entity */ }
-    }
-
-    if (!summaries.length) { log("Summarize: no summaries generated"); return; }
-
-    // One write pass: upsert all Summary nodes + edges
-    const now = new Date().toISOString();
-    await withDb(false, async (conn) => {
-      for (const { entityId, name, summary } of summaries) {
-        const summaryId = `summary:${entityId}`;
-        try {
-          const stmt = await conn.prepare(
-            "MERGE (s:Summary {id: $id}) SET s.title = $title, s.content = $content, s.text = $text, s.agent = $agent, s.source = $source, s.updated_at = $updated_at"
-          );
-          await conn.execute(stmt, { id: summaryId, title: name, content: summary, text: summary, agent: AGENT_ID, source: "brain-summarize", updated_at: now });
-          await conn.query(
-            `MATCH (s:Summary {id: '${esc(summaryId)}'}), (e:Entity {id: '${esc(entityId)}'})
-             MERGE (s)-[:SUMMARIZES {source: 'brain-summarize'}]->(e)`
-          );
-        } catch (e) { log(`Summary write error (${entityId}): ${e.message}`); }
+    // For each top entity: gather all connected Knowledge + Experience nodes
+    const toSummarize = await withDb(true, async (conn) => {
+      const result = [];
+      for (const { entityId, entityName, centrality } of topEntities) {
+        const nodes = await safeQuery(conn, `
+          MATCH (n)-[:ABOUT|INVOLVES]->(e:Entity {id: '${esc(entityId)}'})
+          WHERE (n:Knowledge OR n:Experience) AND n.agent = '${esc(AGENT_ID)}'
+            AND NOT ('summary' IN coalesce(n.tags, []))
+          RETURN n.text AS text, n.timestamp AS ts
+          ORDER BY n.timestamp DESC LIMIT 15
+        `);
+        if (nodes.length >= 3) result.push({ entityId, entityName, centrality, nodes });
       }
+      return result;
     });
 
-    log(`Summarize: wrote ${summaries.length} entity summaries`);
+    if (!toSummarize.length) { log("Summarize: not enough nodes for synthesis"); return; }
+
+    // LLM synthesizes each entity cluster → pushes as Knowledge node with all entity connections
+    const queueItems = [];
+    for (const { entityId, entityName, nodes } of toSummarize) {
+      const nodeList = nodes.map(n => `- ${(n.text || "").slice(0, 160)}`).join("\n");
+      const prompt = `Synthesize these notes about "${entityName}" into one dense paragraph (max 200 chars) capturing the essential current state — facts, decisions, risks, progress. No preamble:\n\n${nodeList}`;
+      try {
+        const synthesis = execSync(`echo ${shellEscape(prompt)} | claude --print --permission-mode bypassPermissions`, {
+          encoding: "utf-8", timeout: 30_000, maxBuffer: 512 * 1024,
+        }).trim().slice(0, 300);
+        if (!synthesis) continue;
+        // Push as a regular Knowledge node — highly connected = naturally high centrality
+        queueItems.push({
+          id: `know:summary:${entityId}:${Date.now()}`,
+          type: "knowledge",
+          text: synthesis,
+          entities: [entityName, AGENT_ID],
+          tags: ["summary"],
+          agent: AGENT_ID,
+          timestamp: new Date().toISOString(),
+          source: "brain-summarize",
+        });
+      } catch { /* skip */ }
+    }
+
+    if (!queueItems.length) { log("Summarize: no synthesis generated"); return; }
+
+    // Write via runFlush pipeline (handles entity wiring + embeddings)
+    const tmpPath = path.join(BRAIN_DIR, `summarize-${Date.now()}.jsonl`);
+    fs.writeFileSync(tmpPath, queueItems.map(i => JSON.stringify(i)).join("\n"));
+    await runFlush(tmpPath);
+
+    log(`Summarize: pushed ${queueItems.length} synthesis nodes`);
   } catch (e) { log(`Summarize error: ${e.message}`); }
 }
 
