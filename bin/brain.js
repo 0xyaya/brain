@@ -193,8 +193,12 @@ switch (cmd) {
               .map(id => ({ id, score: cosine(queryVec, store[id]) }))
               .sort((a, b) => b.score - a.score);
 
-            const conn = await getDb(true);
+            const conn = await getDb(false); // write access needed for boosts
             const recallAgent = flags.agent || resolveAgentId(flags);
+            const seenIds = new Set();
+
+            // --- Vector results ---
+            const vectorHits = [];
             for (const { id, score } of scored.slice(0, 10)) {
               if (score < 0.3) break;
               try {
@@ -202,10 +206,12 @@ switch (cmd) {
                   : id.startsWith("know:") ? "Knowledge" : "Experience";
                 const agentFilter = (table !== "Entity" && recallAgent)
                   ? ` WHERE n.agent = '${recallAgent}'` : "";
-                const q = `MATCH (n:${table} {id: '${id}'})${agentFilter} RETURN n.text AS text, n.tags AS tags, n.agent AS agent`;
-                const rows = await (await conn.query(q)).getAll();
+                const rows = await (await conn.query(
+                  `MATCH (n:${table} {id: '${id}'})${agentFilter} RETURN n.text AS text, n.tags AS tags, n.agent AS agent`
+                )).getAll();
                 if (rows[0]) {
-                  results.push({
+                  seenIds.add(id);
+                  vectorHits.push({
                     source: "graph",
                     id,
                     type: table.toLowerCase(),
@@ -214,16 +220,62 @@ switch (cmd) {
                     agent: rows[0].agent || null,
                     score: Math.round(score * 100) / 100,
                   });
-                  // Boost edge weights on recalled nodes (cap at 5.0)
+                  // Boost edge weights on recalled nodes (LTP)
                   try {
                     await conn.query(
                       `MATCH (n:${table} {id: '${id}'})-[r]-(:Entity)
                        SET r.weight = CASE WHEN r.weight < 4.9 THEN r.weight + 0.1 ELSE 5.0 END`
                     );
-                  } catch { /* no edges yet — skip */ }
+                  } catch { /* no edges yet */ }
                 }
               } catch { /* skip */ }
             }
+
+            // --- Graph expansion: siblings sharing entities with top vector hits ---
+            // Find entities connected to each hit → find other nodes connected to same entities
+            const graphHits = [];
+            for (const hit of vectorHits.slice(0, 5)) {
+              const table = hit.id.startsWith("know:") ? "Knowledge" : "Experience";
+              const edgeRel = table === "Knowledge" ? "ABOUT" : "INVOLVES";
+              const sibRel  = table === "Knowledge" ? "ABOUT" : "INVOLVES";
+              try {
+                // Step 1: get entities of this hit
+                const entities = await (await conn.query(`
+                  MATCH (n:${table} {id: '${hit.id}'})-[r:${edgeRel}]->(e:Entity)
+                  RETURN e.id AS eid, r.weight AS w
+                `)).getAll();
+                if (!entities.length) continue;
+                const eids = entities.map(e => `'${e.eid}'`).join(",");
+
+                // Step 2: find other Knowledge/Experience nodes sharing those entities
+                for (const sibTable of ["Knowledge", "Experience"]) {
+                  const sRel = sibTable === "Knowledge" ? "ABOUT" : "INVOLVES";
+                  const agentF = recallAgent ? ` AND sib.agent = '${recallAgent}'` : "";
+                  const sibs = await (await conn.query(`
+                    MATCH (sib:${sibTable})-[r:${sRel}]->(e:Entity)
+                    WHERE e.id IN [${eids}] AND sib.id <> '${hit.id}'${agentF}
+                    WITH sib, SUM(r.weight) AS sharedWeight
+                    RETURN sib.id AS id, sib.text AS text, sib.agent AS agent, sharedWeight
+                    ORDER BY sharedWeight DESC LIMIT 3
+                  `)).getAll();
+                  for (const sib of sibs) {
+                    if (seenIds.has(sib.id) || !sib.text) continue;
+                    seenIds.add(sib.id);
+                    graphHits.push({
+                      source: "graph-neighbor",
+                      id: sib.id,
+                      type: sibTable.toLowerCase(),
+                      text: (sib.text || "").slice(0, 200),
+                      tags: [],
+                      agent: sib.agent || null,
+                      score: Math.round((hit.score * 0.6 + Math.min(sib.sharedWeight / 5.0, 1) * 0.4) * 100) / 100,
+                    });
+                  }
+                }
+              } catch { /* skip */ }
+            }
+
+            results.push(...vectorHits, ...graphHits);
             await closeDb();
           }
         }
