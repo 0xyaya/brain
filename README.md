@@ -1,184 +1,124 @@
-# Brain — Agent Memory
+# brain
 
-Persistent memory for AI agents. Push experiences and knowledge into a graph, recall by semantic + graph similarity. No external infrastructure required.
+Memory for AI agents. Push what happened, recall what matters.
 
 ```bash
-brain push '{"type":"knowledge","text":"always commit before deploying","entities":["git","deploy"]}'
-brain recall "deployment mistakes"
-# → [0.84] always commit before deploying
-# → [0.71] deploy pipeline failed due to uncommitted config change
+$ brain push '{"type":"experience","text":"prod deploy failed — missing env var DATABASE_URL","entities":["deploy","prod","fail"]}'
+$ brain recall "why did production break"
+→ [0.91] prod deploy failed — missing env var DATABASE_URL
+→ [0.74] deploy pipeline skips env validation when NODE_ENV is not set
 ```
+
+No external infrastructure. One graph file. Works with any agent.
+
+---
 
 ## How it works
 
-Three node types, one graph:
+You push knowledge and experiences as JSON.  
+Brain stores them in a graph. Edges carry weight.  
+Recall is hybrid — vector similarity finds related nodes, graph traversal surfaces connected siblings.  
+Recalled edges grow stronger. Unused ones decay. What matters rises naturally.
 
 ```
-Knowledge  — what was learned (facts, decisions, concerns)
-Experience — what happened (tasks, sessions, outcomes)
-Entity     — who/what (people, projects, tools, concepts)
-```
-
-Edges wire them together:
-```
-Knowledge  -[ABOUT]->   Entity
+Knowledge  -[ABOUT]->    Entity
 Experience -[INVOLVES]-> Entity
 Experience -[DERIVED]->  Knowledge
 ```
 
-**Recall is hybrid** — vector search finds semantically similar nodes, then graph traversal expands to connected siblings ranked by shared edge weight. Used edges get stronger (+0.1 per recall). Unused edges decay weekly (×0.95). High-use nodes naturally rise to the surface.
+---
 
-**MEMORY.md** is auto-maintained — a living document rebuilt from the graph on every consolidation cycle.
-
-## Requirements
-
-- Node.js 20+
-- `claude` CLI — used by `--permanent` and `--summarize` consolidation steps
-- Claude API access (configured in `claude` CLI)
-
-## Quick Start
+## Install
 
 ```bash
-git clone <repo> brain
-cd brain && npm install
-
-# Initialize
+npm install -g brain-plugin
 brain init --agent myagent
-
-# Push some memory
-brain push --agent myagent '{"type":"knowledge","text":"SQLite is safer than Kuzu for embedded graphs","entities":["sqlite","kuzu","architecture"]}'
-
-# Build vector index (downloads ~25MB model once)
-brain consolidate --agent myagent --embed
-
-# Recall
-brain recall --agent myagent "database choices"
 ```
 
-## OpenClaw Plugin
+Or from source:
 
 ```bash
-git clone <repo> ~/.openclaw/extensions/brain
-cd ~/.openclaw/extensions/brain && npm install
+git clone https://github.com/0xyaya/brain
+cd brain && npm install && npm link
+brain init --agent myagent
 ```
 
-Add to `openclaw.json`:
-```json
-{
-  "plugins": {
-    "brain": {
-      "config": {
-        "agentId": "myagent",
-        "corpusRoot": "~/corpus"
-      }
-    }
-  }
-}
+---
+
+## Push
+
+```bash
+# Something you learned
+brain push '{"type":"knowledge","text":"always run migrations in a transaction","entities":["postgres","migrations","decision"]}'
+
+# Something that happened
+brain push '{"type":"experience","text":"migrated 2M rows — took 4min, zero downtime","entities":["postgres","migrations","prod","success"]}'
 ```
+
+`entities[]` takes real names and classification words alike — `decision`, `risk`, `open`, `success` become graph nodes and traversable axes of memory.
+
+---
+
+## Recall
+
+```bash
+brain recall "database migration lessons"
+```
+
+Returns nodes ranked by vector score × edge weight. The more a node is recalled, the stronger its edges become.
+
+---
 
 ## CLI
 
 ```bash
-brain init     [--agent <id>] [--corpus <path>]     # Initialize for this machine
-brain push     [--agent <id>] <json>                # Queue a memory item
-brain flush    [--agent <id>]                       # Write queue to graph
-brain recall   [--agent <id>] [--days N] <query>    # Hybrid semantic + graph search
-brain explore  <entity>                             # Graph neighborhood of an entity
-brain get      <id>                                 # Fetch full node by ID
-brain remove   <id>                                 # Delete a node (MEMORY.md self-heals)
-brain consolidate [--agent <id>] [flags]            # Update MEMORY.md
+brain push     <json>          # Queue a memory item
+brain flush                    # Write queue to graph
+brain recall   <query>         # Hybrid semantic + graph search
+brain explore  <entity>        # Graph neighborhood of an entity
+brain get      <id>            # Fetch full node by ID
+brain remove   <id>            # Delete a node
+brain consolidate [--flags]    # Rebuild MEMORY.md
 ```
 
-### Push format
+All commands accept `--agent <id>` for multi-agent setups.
 
-```json
-{
-  "type": "knowledge",
-  "text": "SQLite is the safer fallback — no concurrent write limitations",
-  "entities": ["sqlite", "brain", "architecture", "decision"],
-  "derives": ["exp:abc123"]
-}
-```
-
-```json
-{
-  "type": "experience",
-  "text": "Migrated brain DB from Kuzu to SQLite — no data loss",
-  "entities": ["sqlite", "kuzu", "brain", "success"]
-}
-```
-
-**`entities[]`** is everything — real names AND classification words mixed freely. Each becomes an Entity node with a graph edge. Classification words like `decision`, `risk`, `open`, `resolved`, `success` become traversable axes of the graph.
-
-**`derives[]`** links a knowledge node back to the experience that produced it (creates `DERIVED` edge).
-
-### Consolidate flags
-
-| Flag          | What it does                                              | Needs Claude |
-|---------------|-----------------------------------------------------------|:---:|
-| `--focus`     | Update MEMORY.md focus (highest-centrality × recency)    | ✗   |
-| `--recent`    | Update MEMORY.md recent (last 72h digest)                 | ✗   |
-| `--permanent` | LLM synthesizes top nodes into permanent facts           | ✓   |
-| `--summarize` | Creates synthesis Knowledge nodes for top entity clusters | ✓   |
-| `--ingest`    | Extract knowledge from daily log files (LLM per file)    | ✓   |
-| `--maintain`  | Decay edge weights (×0.95), purge isolated nodes         | ✗   |
-| `--embed`     | Backfill vector embeddings for existing nodes            | ✗   |
-
-Default (no flags): `--focus --recent`
-
-### Recommended cron schedule
-
-```
-Every 30m  →  brain flush + brain consolidate --focus --recent
-Every 6h   →  brain consolidate --summarize --permanent
-Weekly     →  brain consolidate --ingest --maintain --embed
-```
-
-The sleep-cycle model:
-- **Light sleep** (30m) — process new input, surface what matters
-- **Deep sleep** (6h) — synthesize, strengthen important connections
-- **REM** (weekly) — prune, re-ingest from source, rebuild embeddings
-
-## Configuration
-
-`$BRAIN_DIR/config.json` (default: `~/corpus/brain/config.json`):
-
-```json
-{
-  "agentId": "myagent",
-  "corpusRoot": "~/my-data"
-}
-```
-
-Environment variables:
-
-| Variable            | Default               | Description                   |
-|---------------------|-----------------------|-------------------------------|
-| `BRAIN_DIR`         | `~/corpus/brain`      | DB, queue, config             |
-| `BRAIN_AGENT_ID`    | from config.json      | Agent identifier              |
-| `BRAIN_CORPUS_ROOT` | `~/corpus`            | Root for agent memory dirs    |
+---
 
 ## MEMORY.md
 
-Auto-generated from the graph. Three sections:
+`brain consolidate` maintains a `MEMORY.md` file for each agent — rebuilt from the graph on every run. Three sections: **Focus** (highest-centrality × recency), **Recent** (last 72h), **Permanent** (LLM synthesis of top nodes).
 
-```markdown
-# Focus    — top 5 nodes by centrality × recency decay (λ=0.05)
-# Recent   — last 72h experiences and knowledge, noise-filtered
-# Permanent — LLM synthesis of highest-centrality nodes
+```
+# Focus
+- prod deploy is unstable — three failures this week linked to env config
+- migration strategy unresolved: rolling vs blue-green still open
+
+# Recent
+- deploy pipeline fixed: added env validation step [success]
+- decided to use feature flags for all schema changes [decision]
 ```
 
-Never edit MEMORY.md manually — it's overwritten on every consolidation. Fix bad content with `brain remove <id>`.
+Inject into agent context at session start. Never edit manually.
 
-## MCP Server
+---
 
-Brain also ships as an MCP server for direct integration with Claude Desktop or other MCP clients:
+## Consolidation schedule
 
-```bash
-node src/mcp.js
+```
+Every 30m   brain flush && brain consolidate --focus --recent
+Every 6h    brain consolidate --summarize --permanent
+Weekly      brain consolidate --ingest --maintain --embed
 ```
 
-Configure in `.mcp.json`:
+Light sleep → deep sleep → REM. The graph consolidates like memory does.
+
+---
+
+## MCP
+
+Works with Claude Desktop, Cursor, or any MCP client:
+
 ```json
 {
   "mcpServers": {
@@ -191,21 +131,12 @@ Configure in `.mcp.json`:
 }
 ```
 
-## Example personas
+---
 
-Ready-to-import `.brain.json` files in `personas/`:
+## OpenClaw
 
-```bash
-brain push --graph personas/karpathy.brain.json   # Andrej Karpathy knowledge graph
-brain push --graph personas/hormozi.brain.json    # Alex Hormozi frameworks
-```
+Using [OpenClaw](https://github.com/openclaw/openclaw)? See [brain-openclaw](https://github.com/0xyaya/brain-openclaw) for the native plugin.
 
-## Known limitations
-
-- LadybugDB has a bug causing assertion failures on `SET` operations for `DERIVED` and `RELATES_TO` edge types — `--maintain` skips those relationships as a workaround
-- Stale lock: if consolidate crashes, remove `~/corpus/brain/consolidate.lock` manually
-- Vector embeddings stored outside LadybugDB (`embeddings.json`) to avoid column type conflicts
-
-## License
+---
 
 MIT
