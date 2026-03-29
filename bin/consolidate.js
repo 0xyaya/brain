@@ -474,7 +474,7 @@ async function runDaily() {
 // Reads items from filePath, validates each one, writes directly to Kuzu.
 // No LLM. Agents generate structured JSON at runtime — extraction already happened.
 async function runFlush(filePath) {
-  if (!fs.existsSync(filePath)) { log(`No input file: ${filePath}`); return; }
+  if (!fs.existsSync(filePath)) { return; }  // empty queue — nothing to flush
   const raw = fs.readFileSync(filePath, "utf-8").trim();
   if (!raw) { log("Empty input file."); return; }
 
@@ -890,6 +890,8 @@ async function run() {
       return;
     }
     if (flags.input) {
+      // Skip silently if queue file doesn't exist yet (PostToolUse hook fires constantly)
+      if (!fs.existsSync(flags.input)) { releaseLock(); return; }
       await runFlush(flags.input);
     } else {
       // exportIndex is called inside runFlush; call explicitly when flush didn't run
