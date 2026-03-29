@@ -523,8 +523,8 @@ switch (cmd) {
       created.push("CLAUDE.md (brain snippet appended)");
     }
 
-    // --- Claude Code hooks: wire Stop + PostToolUse into ~/.claude/settings.json ---
-    const claudeSettingsPath = path.join(os.homedir(), ".claude", "settings.json");
+    // --- Claude Code hooks: wire Stop + PostToolUse into .claude/settings.local.json (project-level, personal) ---
+    const claudeSettingsPath = path.join(CWD, ".claude", "settings.local.json");
     try {
       const BRAIN_BIN = process.argv[1]; // path to this brain.js
       const flushCmd = `BRAIN_DIR=${resolvedBrainDir} node ${BRAIN_BIN} flush`;
