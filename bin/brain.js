@@ -526,17 +526,17 @@ switch (cmd) {
 
       // PostToolUse: flush queue after every tool call
       // Claude Code hook format: { matcher: "", hooks: [{ type: "command", command: "..." }] }
-      settings.hooks.PostToolUse = settings.hooks.PostToolUse || [];
-      const hasFlush = settings.hooks.PostToolUse.some(h => h.hooks?.[0]?.command?.includes(resolvedBrainDir));
-      if (!hasFlush) settings.hooks.PostToolUse.push({
+      // Always remove stale brain entries for this BRAIN_DIR, then re-add with correct format
+      const isBrainHook = (h) => h?.command?.includes(resolvedBrainDir) || h?.hooks?.[0]?.command?.includes(resolvedBrainDir);
+
+      settings.hooks.PostToolUse = (settings.hooks.PostToolUse || []).filter(h => !isBrainHook(h));
+      settings.hooks.PostToolUse.push({
         matcher: "",
         hooks: [{ type: "command", command: flushCmd }]
       });
 
-      // Stop: flush + consolidate when session ends
-      settings.hooks.Stop = settings.hooks.Stop || [];
-      const hasStop = settings.hooks.Stop.some(h => h.hooks?.[0]?.command?.includes(resolvedBrainDir));
-      if (!hasStop) settings.hooks.Stop.push({
+      settings.hooks.Stop = (settings.hooks.Stop || []).filter(h => !isBrainHook(h));
+      settings.hooks.Stop.push({
         matcher: "",
         hooks: [{ type: "command", command: `${flushCmd} && ${consolidateCmd} --embed` }]
       });
