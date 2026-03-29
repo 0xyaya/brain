@@ -55,6 +55,7 @@ export async function initSchema() {
       confidence  DOUBLE,
       agent       STRING,
       timestamp   STRING,
+      tags        STRING[],
       PRIMARY KEY (id)
     )`,
     `CREATE NODE TABLE IF NOT EXISTS Experience (
@@ -68,6 +69,7 @@ export async function initSchema() {
       metadata         STRING,
       source           STRING,
       timestamp        STRING,
+      tags             STRING[],
       PRIMARY KEY (id)
     )`,
   ];
