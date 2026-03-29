@@ -512,15 +512,18 @@ switch (cmd) {
       created.push("AGENTS.md (brain snippet appended)");
     }
 
-    // --- CLAUDE.md: MCP tool instructions for Claude Code ---
-    const claudeMdPath = path.join(CWD, "CLAUDE.md");
-    const claudeSnippet = `\n## Memory (brain)\n\nYou have persistent memory via brain MCP tools. Use them proactively.\n\n**Session start**: always call \`brain_recall\` with the current task before doing anything else.\n\n**After completing tasks or making decisions**: call \`brain_push\` immediately.\n\nPush format:\n\`\`\`json\n{"type":"knowledge","text":"what was learned or decided","entities":["topic","decision"],"tmp_weight":3.0}\n\`\`\`\n\`tmp_weight\` 1–5: how important is this for future recall (5 = critical, 1 = routine).\n\n**To check recent unflushed work**: \`brain_recall\` includes pending queue items — check \`source: "queue"\` results.\n\n**Remove bad/stale nodes**: \`brain_remove <id>\` — MEMORY.md self-heals on next consolidation.\n`;
+    // --- Claude instructions: .claude/brain.md if .claude/ exists, else CLAUDE.md at root ---
+    const claudeDir = path.join(CWD, ".claude");
+    const claudeMdPath = fs.existsSync(claudeDir)
+      ? path.join(claudeDir, "brain.md")
+      : path.join(CWD, "CLAUDE.md");
+    const claudeSnippet = `## Memory (brain)\n\nYou have persistent memory via brain MCP tools. Use them proactively.\n\n**Session start**: always call \`brain_recall\` with the current task before doing anything else.\n\n**After completing tasks or making decisions**: call \`brain_push\` immediately.\n\nPush format:\n\`\`\`json\n{"type":"knowledge","text":"what was learned or decided","entities":["topic","decision"],"tmp_weight":3.0}\n\`\`\`\n\`tmp_weight\` 1–5: how important is this for future recall (5 = critical, 1 = routine).\n\n**To check recent unflushed work**: \`brain_recall\` includes pending queue items — check \`source: "queue"\` results.\n\n**Remove bad/stale nodes**: \`brain_remove <id>\` — MEMORY.md self-heals on next consolidation.\n`;
     if (!fs.existsSync(claudeMdPath)) {
-      fs.writeFileSync(claudeMdPath, `# ${projectName}${claudeSnippet}`);
-      created.push("CLAUDE.md");
+      fs.writeFileSync(claudeMdPath, claudeSnippet);
+      created.push(path.relative(CWD, claudeMdPath));
     } else if (!fs.readFileSync(claudeMdPath, "utf-8").includes("brain_recall")) {
-      fs.appendFileSync(claudeMdPath, claudeSnippet);
-      created.push("CLAUDE.md (brain snippet appended)");
+      fs.appendFileSync(claudeMdPath, "\n" + claudeSnippet);
+      created.push(path.relative(CWD, claudeMdPath) + " (brain snippet appended)");
     }
 
     // --- Claude Code hooks: wire Stop + PostToolUse into .claude/settings.local.json (project-level, personal) ---
