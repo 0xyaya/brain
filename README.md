@@ -98,6 +98,10 @@ Override the agent ID via `BRAIN_AGENT_ID` env var, or use `BRAIN_DIR` for full 
 # Recent
 - deploy pipeline fixed: added env validation step [success]
 - decided to use feature flags for all schema changes [decision]
+
+# Permanent
+- always run migrations in a transaction — learned the hard way in prod
+- data quality beats model complexity every time
 ```
 
 Inject into agent context at session start. Never edit manually.
