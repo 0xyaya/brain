@@ -585,21 +585,30 @@ switch (cmd) {
     // --- Level 1: System knowledge (always) ---
     const systemKnowledgePath = path.join(BIN_DIR, "../system-knowledge/brain.json");
     if (fs.existsSync(systemKnowledgePath)) {
-      try {
-        const sysData = JSON.parse(fs.readFileSync(systemKnowledgePath, "utf-8"));
-        const nodes = sysData.nodes || [];
-        let sysCount = 0;
-        for (const node of nodes) {
-          const item = { ...node, agent: agentId, source: "system", timestamp: new Date().toISOString() };
-          fs.appendFileSync(path.join(resolvedBrainDir, "queue.jsonl"), JSON.stringify(item) + "\n");
-          sysCount++;
-        }
-        created.push(`system-knowledge: queued ${sysCount} nodes`);
-      } catch (e) { /* skip */ }
+      const sysData = JSON.parse(fs.readFileSync(systemKnowledgePath, "utf-8"));
+      const nodes = sysData.nodes || [];
+      let sysCount = 0;
+      for (const node of nodes) {
+        const item = { ...node, agent: agentId, source: "system", timestamp: new Date().toISOString() };
+        fs.appendFileSync(path.join(resolvedBrainDir, "queue.jsonl"), JSON.stringify(item) + "\n");
+        sysCount++;
+      }
+      created.push(`system-knowledge: queued ${sysCount} nodes`);
+    } else {
+      console.warn(`  ⚠ system-knowledge not found at ${systemKnowledgePath}`);
     }
 
     // --- Level 2: Project scan (optional) ---
-    const { ingestProject } = cfg;
+    // If brain.json exists but has no ingestProject key, prompt interactively
+    let ingestProject = cfg.ingestProject;
+    if (ingestProject === undefined) {
+      const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const ans = await new Promise(res => rl2.question(`\n  Scan project files for initial knowledge? (y/n) [y]: `, a => res(a.trim() || "y")));
+      rl2.close();
+      ingestProject = ans.toLowerCase().startsWith("y");
+      cfg.ingestProject = ingestProject;
+      fs.writeFileSync(brainJsonPath, JSON.stringify(cfg, null, 2));
+    }
     if (ingestProject) {
       // Find candidate files: README, package.json, docs, config files
       const candidates = [];
