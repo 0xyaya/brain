@@ -294,7 +294,30 @@ switch (cmd) {
       }
     } catch { /* embedding unavailable */ }
 
-    // 2. Keyword search over daily logs
+    // 2. Queue scan — unflushed items ranked by tmp_weight (1-5, default 1.0)
+    const cfg = loadConfig(BRAIN_DIR);
+    const brainJson = (() => { try { return JSON.parse(fs.readFileSync(path.join(process.cwd(), "brain.json"), "utf-8")); } catch { return {}; } })();
+    const queueLimit = brainJson.queueLimit ?? cfg.queueLimit ?? 5;
+    try {
+      if (fs.existsSync(QUEUE_PATH)) {
+        const lines = fs.readFileSync(QUEUE_PATH, "utf-8").trim().split("\n").filter(Boolean);
+        const queueItems = lines
+          .map(l => { try { return JSON.parse(l); } catch { return null; } })
+          .filter(item => item && item.text && (!agentId || !item.agent || item.agent === agentId))
+          .sort((a, b) => (b.tmp_weight ?? 1.0) - (a.tmp_weight ?? 1.0))
+          .slice(0, queueLimit)
+          .map(item => ({
+            source: "queue",
+            text: (item.text || "").slice(0, 200),
+            entities: item.entities || [],
+            tmp_weight: item.tmp_weight ?? 1.0,
+            timestamp: item.timestamp || null,
+          }));
+        results.push(...queueItems);
+      }
+    } catch { /* queue unreadable */ }
+
+    // 3. Keyword search over daily logs
     const days = flags.days ? parseInt(flags.days) : 3;
     const dailyDir = resolveDailyDir();
     const queryLower = query.toLowerCase();

@@ -50,9 +50,12 @@ Generates an `AGENTS.md` with shell command instructions — works for every age
 ```json
 {
   "projectName": "myapp",
-  "brainDir": ".brain"
+  "brainDir": ".brain",
+  "queueLimit": 5
 }
 ```
+
+`queueLimit` controls how many pending (unflushed) queue items appear in recall results, ranked by `tmp_weight`. Default: `5`.
 
 ---
 
@@ -65,6 +68,8 @@ brain push '{"type":"knowledge","text":"always run migrations in a transaction",
 # Something that happened
 brain push '{"type":"experience","text":"migrated 2M rows — took 4min, zero downtime","entities":["postgres","migrations","prod","success"]}'
 ```
+
+`tmp_weight` (1–5, default 1.0) — importance set by the agent at push time. Queue items ranked by this before flush.
 
 `entities[]` takes real names and classification words alike — `decision`, `risk`, `open`, `success` become graph nodes and traversable axes of memory.
 
