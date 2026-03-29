@@ -165,6 +165,8 @@ switch (cmd) {
 
   case "flush": {
     const { flags } = parseFlags(args);
+    // If BRAIN_DIR doesn't exist, brain was removed — do nothing silently
+    if (!fs.existsSync(BRAIN_DIR)) process.exit(0);
     const inputFile = flags.buffer || QUEUE_PATH;
     if (flags.buffer && !fs.existsSync(flags.buffer)) {
       console.error("Buffer file not found:", flags.buffer);
