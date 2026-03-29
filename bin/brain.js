@@ -532,7 +532,7 @@ switch (cmd) {
       // Stop: flush + consolidate when session ends
       settings.hooks.Stop = settings.hooks.Stop || [];
       const hasStop = settings.hooks.Stop.some(h => h.command?.includes(resolvedBrainDir));
-      if (!hasStop) settings.hooks.Stop.push({ command: `${flushCmd} && ${consolidateCmd}` });
+      if (!hasStop) settings.hooks.Stop.push({ command: `${flushCmd} && ${consolidateCmd} --embed` });
 
       fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
       fs.writeFileSync(claudeSettingsPath, JSON.stringify(settings, null, 2));
@@ -545,7 +545,7 @@ switch (cmd) {
     console.log(`  brain dir:  ${resolvedBrainDir}`);
     console.log(`  agent ID:   ${agentId}`);
     for (const f of created) console.log(`  created:    ${f}`);
-    console.log(`\n  Next: brain consolidate --embed  (build vector index once)`);
+    console.log(`\n  Ready. Start your Claude Code session — brain will handle the rest.`);
     break;
   }
 
