@@ -473,8 +473,10 @@ switch (cmd) {
       console.log(`\n  ✦ brain init\n`);
       const projectName = await ask("Project name", path.basename(CWD));
       const brainDir = await ask("Brain directory", ".brain");
+      const ingestAnswer = await ask("Scan project files for initial knowledge? (y/n)", "y");
+      const ingestProject = ingestAnswer.toLowerCase().startsWith("y");
 
-      cfg = { projectName, brainDir };
+      cfg = { projectName, brainDir, ingestProject };
       rl.close();
 
       fs.writeFileSync(brainJsonPath, JSON.stringify(cfg, null, 2));
@@ -580,6 +582,50 @@ switch (cmd) {
     console.log(`  brain dir:  ${resolvedBrainDir}`);
     console.log(`  agent ID:   ${agentId}`);
     for (const f of created) console.log(`  created:    ${f}`);
+    // --- Level 1: System knowledge (always) ---
+    const systemKnowledgePath = path.join(BIN_DIR, "../../system-knowledge/brain.json");
+    if (fs.existsSync(systemKnowledgePath)) {
+      try {
+        const sysData = JSON.parse(fs.readFileSync(systemKnowledgePath, "utf-8"));
+        const nodes = sysData.nodes || [];
+        let sysCount = 0;
+        for (const node of nodes) {
+          const item = { ...node, agent: agentId, source: "system", timestamp: new Date().toISOString() };
+          fs.appendFileSync(path.join(resolvedBrainDir, "queue.jsonl"), JSON.stringify(item) + "\n");
+          sysCount++;
+        }
+        created.push(`system-knowledge: queued ${sysCount} nodes`);
+      } catch (e) { /* skip */ }
+    }
+
+    // --- Level 2: Project scan (optional) ---
+    const { ingestProject } = cfg;
+    if (ingestProject) {
+      // Find candidate files: README, package.json, docs, config files
+      const candidates = [];
+      const scanPatterns = [
+        "README.md", "README.txt", "package.json", "pyproject.toml",
+        "Cargo.toml", "go.mod", "ARCHITECTURE.md", "CONTRIBUTING.md",
+      ];
+      for (const f of scanPatterns) {
+        const fp = path.join(CWD, f);
+        if (fs.existsSync(fp)) candidates.push(fp);
+      }
+      // Scan docs/ and src/ for .md files (max 10)
+      for (const dir of ["docs", "doc", "src", ".claude"]) {
+        const dirPath = path.join(CWD, dir);
+        if (!fs.existsSync(dirPath)) continue;
+        const files = fs.readdirSync(dirPath).filter(f => f.endsWith(".md")).slice(0, 5);
+        candidates.push(...files.map(f => path.join(dirPath, f)));
+      }
+
+      if (candidates.length > 0) {
+        console.log(`\n  Scanning ${candidates.length} project files...`);
+        spawnConsolidate("--ingest", "--ingest-dir", CWD, "--ingest-files", candidates.join(","));
+        created.push(`project scan: ${candidates.length} files queued for ingestion`);
+      }
+    }
+
     console.log(`\n  Ready. Start your Claude Code session — brain will handle the rest.`);
     break;
   }

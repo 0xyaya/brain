@@ -80,11 +80,12 @@ const shellEscape = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
 // --daily         write daily log file
 // --maintain      prune old experiences, strengthen edges
 // --embed         backfill embeddings for existing nodes
-const flags = { focus: false, recent: false, permanent: false, summarize: false, maintain: false, embed: false, input: null, ingest: false, ingestDir: null, threshold: null };
+const flags = { focus: false, recent: false, permanent: false, summarize: false, maintain: false, embed: false, input: null, ingest: false, ingestDir: null, ingestFiles: null, threshold: null };
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
   if (a === "--input" && process.argv[i + 1]) flags.input = process.argv[++i];
   else if (a === "--ingest-dir" && process.argv[i + 1]) flags.ingestDir = process.argv[++i];
+  else if (a === "--ingest-files" && process.argv[i + 1]) { flags.ingestFiles = process.argv[++i].split(","); flags.ingest = true; }
   else if (a === "--threshold" && process.argv[i + 1]) flags.threshold = parseFloat(process.argv[++i]);
   else if (a.startsWith("--") && a.slice(2) in flags) flags[a.slice(2)] = true;
 }
@@ -800,6 +801,35 @@ ${content.slice(0, 6000)}`;
   }
 }
 
+async function runIngestFiles(filePaths, threshold = 0.82) {
+  log(`Ingest: processing ${filePaths.length} project files`);
+  let pushed = 0, skipped = 0, errors = 0;
+
+  for (const filePath of filePaths) {
+    if (!fs.existsSync(filePath)) continue;
+    const content = fs.readFileSync(filePath, "utf-8").trim();
+    if (!content) continue;
+
+    log(`Ingest: processing ${path.basename(filePath)} (${content.length} chars)`);
+    const items = await extractItemsFromFile(content, AGENT_ID);
+
+    for (const item of items) {
+      try {
+        const text = item.text || "";
+        if (!text) { errors++; continue; }
+        const dup = await isDuplicate(text, threshold);
+        if (dup) { skipped++; } else {
+          fs.appendFileSync(QUEUE_PATH, JSON.stringify({ ...item, source: "project-scan" }) + "\n");
+          pushed++;
+        }
+      } catch (e) { errors++; }
+    }
+  }
+
+  log(`Ingest: done. pushed=${pushed} skipped=${skipped} errors=${errors}`);
+  if (pushed > 0) { log("Ingest: flushing..."); await runFlush(QUEUE_PATH); }
+}
+
 async function runIngest(memoryDir, threshold = 0.82) {
   const files = fs.readdirSync(memoryDir)
     .filter(f => /^\d{4}-\d{2}-\d{2}.*\.md$/.test(f))
@@ -848,10 +878,15 @@ async function run() {
   try {
     if (flags.maintain) await runMaintain();
     if (flags.ingest) {
-      const memDir = flags.ingestDir || path.join(
-        path.dirname(path.dirname(MEMORY_MD_PATH)), "memory"
-      );
-      await runIngest(memDir, flags.threshold || 0.85);
+      if (flags.ingestFiles) {
+        // Ingest specific files (e.g. from brain init project scan)
+        await runIngestFiles(flags.ingestFiles, flags.threshold || 0.85);
+      } else {
+        const memDir = flags.ingestDir || path.join(
+          path.dirname(path.dirname(MEMORY_MD_PATH)), "memory"
+        );
+        await runIngest(memDir, flags.threshold || 0.85);
+      }
       return;
     }
     if (flags.input) {
