@@ -511,15 +511,41 @@ switch (cmd) {
       created.push("AGENTS.md (brain snippet appended)");
     }
 
+    // --- Claude Code hooks: wire Stop + PostToolUse into ~/.claude/settings.json ---
+    const claudeSettingsPath = path.join(os.homedir(), ".claude", "settings.json");
+    try {
+      const BRAIN_BIN = process.argv[1]; // path to this brain.js
+      const flushCmd = `BRAIN_DIR=${resolvedBrainDir} node ${BRAIN_BIN} flush`;
+      const consolidateCmd = `BRAIN_DIR=${resolvedBrainDir} node ${BRAIN_BIN} consolidate --focus --recent`;
+
+      const settings = fs.existsSync(claudeSettingsPath)
+        ? JSON.parse(fs.readFileSync(claudeSettingsPath, "utf-8"))
+        : {};
+
+      settings.hooks = settings.hooks || {};
+
+      // PostToolUse: flush queue after every tool call
+      settings.hooks.PostToolUse = settings.hooks.PostToolUse || [];
+      const hasFlush = settings.hooks.PostToolUse.some(h => h.command?.includes(resolvedBrainDir) && h.command?.includes("flush"));
+      if (!hasFlush) settings.hooks.PostToolUse.push({ command: flushCmd });
+
+      // Stop: flush + consolidate when session ends
+      settings.hooks.Stop = settings.hooks.Stop || [];
+      const hasStop = settings.hooks.Stop.some(h => h.command?.includes(resolvedBrainDir));
+      if (!hasStop) settings.hooks.Stop.push({ command: `${flushCmd} && ${consolidateCmd}` });
+
+      fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
+      fs.writeFileSync(claudeSettingsPath, JSON.stringify(settings, null, 2));
+      created.push("~/.claude/settings.json (PostToolUse + Stop hooks)");
+    } catch (e) {
+      console.warn(`  ⚠ Could not wire Claude Code hooks: ${e.message}`);
+    }
+
     console.log(`\n  ✓ ${projectName} — brain initialized`);
     console.log(`  brain dir:  ${resolvedBrainDir}`);
     console.log(`  agent ID:   ${agentId}`);
     for (const f of created) console.log(`  created:    ${f}`);
-    console.log(`\n  Next steps:`);
-    console.log(`    brain push '{"type":"knowledge","text":"...","entities":["topic"]}'`);
-    console.log(`    brain flush`);
-    console.log(`    brain consolidate --embed`);
-    console.log(`    brain recall "test query"`);
+    console.log(`\n  Next: brain consolidate --embed  (build vector index once)`);
     break;
   }
 
