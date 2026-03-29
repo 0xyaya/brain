@@ -578,10 +578,7 @@ switch (cmd) {
       console.warn(`  ⚠ Could not wire Claude Code hooks: ${e.message}`);
     }
 
-    console.log(`\n  ✓ ${projectName} — brain initialized`);
-    console.log(`  brain dir:  ${resolvedBrainDir}`);
-    console.log(`  agent ID:   ${agentId}`);
-    for (const f of created) console.log(`  created:    ${f}`);
+    // Print summary after all created[] items are populated (Level 1 + 2 push below)
     // --- Level 1: System knowledge (always) ---
     const systemKnowledgePath = [
       path.join(BIN_DIR, "../system-knowledge/brain.json"),
@@ -638,6 +635,10 @@ switch (cmd) {
       }
     }
 
+    console.log(`\n  ✓ ${projectName} — brain initialized`);
+    console.log(`  brain dir:  ${resolvedBrainDir}`);
+    console.log(`  agent ID:   ${agentId}`);
+    for (const f of created) console.log(`  created:    ${f}`);
     console.log(`\n  Ready. Start your Claude Code session — brain will handle the rest.`);
     break;
   }
