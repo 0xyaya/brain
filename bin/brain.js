@@ -583,8 +583,11 @@ switch (cmd) {
     console.log(`  agent ID:   ${agentId}`);
     for (const f of created) console.log(`  created:    ${f}`);
     // --- Level 1: System knowledge (always) ---
-    const systemKnowledgePath = path.join(BIN_DIR, "../system-knowledge/brain.json");
-    if (fs.existsSync(systemKnowledgePath)) {
+    const systemKnowledgePath = [
+      path.join(BIN_DIR, "../system-knowledge/brain.json"),
+      path.join(fs.realpathSync(BIN_DIR), "../system-knowledge/brain.json"),
+    ].find(p => fs.existsSync(p));
+    if (systemKnowledgePath) {
       const sysData = JSON.parse(fs.readFileSync(systemKnowledgePath, "utf-8"));
       const nodes = sysData.nodes || [];
       let sysCount = 0;
@@ -595,7 +598,7 @@ switch (cmd) {
       }
       created.push(`system-knowledge: queued ${sysCount} nodes`);
     } else {
-      console.warn(`  ⚠ system-knowledge not found at ${systemKnowledgePath}`);
+      console.warn(`  ⚠ system-knowledge not found (looked in ${path.join(BIN_DIR, "../system-knowledge/")})`);
     }
 
     // --- Level 2: Project scan (optional) ---
