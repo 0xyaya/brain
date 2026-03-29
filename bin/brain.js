@@ -499,16 +499,28 @@ switch (cmd) {
       fs.writeFileSync(memoryMdPath, `# MEMORY.md — ${projectName}\n\n<!-- BRAIN:FOCUS:START -->\n# Focus\n<!-- BRAIN:FOCUS:END -->\n\n<!-- BRAIN:RECENT:START -->\n# Recent\n<!-- BRAIN:RECENT:END -->\n\n<!-- BRAIN:PERMANENT:START -->\n# Permanent\n<!-- BRAIN:PERMANENT:END -->\n`);
     }
 
+    const created = [];
+
     // --- AGENTS.md: shell instructions, works for every agent ---
     const agentsMdPath = path.join(CWD, "AGENTS.md");
-    const snippet = `\n## Memory (brain)\n\nUse brain CLI to maintain persistent memory across sessions.\n\n- **Session start**: \`brain recall "current task"\` — prime context before working\n- **After tasks/decisions**: \`brain push '{"type":"knowledge","text":"...","entities":["topic"]}'\`\n- **Flush queue**: \`brain flush\` — write queue to graph\n- **BRAIN_DIR**: \`${resolvedBrainDir}\`\n`;
-    const created = [];
+    const agentsSnippet = `\n## Memory (brain)\n\nUse brain CLI to maintain persistent memory across sessions.\n\n- **Session start**: \`brain recall "current task"\` — prime context before working\n- **After tasks/decisions**: \`brain push '{"type":"knowledge","text":"...","entities":["topic"]}'\`\n- **Flush queue**: \`brain flush\` — write queue to graph\n- **BRAIN_DIR**: \`${resolvedBrainDir}\`\n`;
     if (!fs.existsSync(agentsMdPath)) {
-      fs.writeFileSync(agentsMdPath, `# ${projectName}${snippet}`);
+      fs.writeFileSync(agentsMdPath, `# ${projectName}${agentsSnippet}`);
       created.push("AGENTS.md");
     } else if (!fs.readFileSync(agentsMdPath, "utf-8").includes("brain recall")) {
-      fs.appendFileSync(agentsMdPath, snippet);
+      fs.appendFileSync(agentsMdPath, agentsSnippet);
       created.push("AGENTS.md (brain snippet appended)");
+    }
+
+    // --- CLAUDE.md: MCP tool instructions for Claude Code ---
+    const claudeMdPath = path.join(CWD, "CLAUDE.md");
+    const claudeSnippet = `\n## Memory (brain)\n\nYou have persistent memory via brain MCP tools. Use them proactively.\n\n**Session start**: always call \`brain_recall\` with the current task before doing anything else.\n\n**After completing tasks or making decisions**: call \`brain_push\` immediately.\n\nPush format:\n\`\`\`json\n{"type":"knowledge","text":"what was learned or decided","entities":["topic","decision"],"tmp_weight":3.0}\n\`\`\`\n\`tmp_weight\` 1–5: how important is this for future recall (5 = critical, 1 = routine).\n\n**To check recent unflushed work**: \`brain_recall\` includes pending queue items — check \`source: "queue"\` results.\n\n**Remove bad/stale nodes**: \`brain_remove <id>\` — MEMORY.md self-heals on next consolidation.\n`;
+    if (!fs.existsSync(claudeMdPath)) {
+      fs.writeFileSync(claudeMdPath, `# ${projectName}${claudeSnippet}`);
+      created.push("CLAUDE.md");
+    } else if (!fs.readFileSync(claudeMdPath, "utf-8").includes("brain_recall")) {
+      fs.appendFileSync(claudeMdPath, claudeSnippet);
+      created.push("CLAUDE.md (brain snippet appended)");
     }
 
     // --- Claude Code hooks: wire Stop + PostToolUse into ~/.claude/settings.json ---
