@@ -573,7 +573,7 @@ switch (cmd) {
 
       fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
       fs.writeFileSync(claudeSettingsPath, JSON.stringify(settings, null, 2));
-      created.push("~/.claude/settings.json (PostToolUse + Stop hooks)");
+      created.push(".claude/settings.local.json (PostToolUse + Stop hooks)");
     } catch (e) {
       console.warn(`  ⚠ Could not wire Claude Code hooks: ${e.message}`);
     }
@@ -583,7 +583,7 @@ switch (cmd) {
     console.log(`  agent ID:   ${agentId}`);
     for (const f of created) console.log(`  created:    ${f}`);
     // --- Level 1: System knowledge (always) ---
-    const systemKnowledgePath = path.join(BIN_DIR, "../../system-knowledge/brain.json");
+    const systemKnowledgePath = path.join(BIN_DIR, "../system-knowledge/brain.json");
     if (fs.existsSync(systemKnowledgePath)) {
       try {
         const sysData = JSON.parse(fs.readFileSync(systemKnowledgePath, "utf-8"));

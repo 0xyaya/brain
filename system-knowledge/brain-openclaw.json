@@ -1,0 +1,25 @@
+{
+  "description": "System knowledge about brain-openclaw — inject into OpenClaw agent memories",
+  "nodes": [
+    {
+      "type": "knowledge",
+      "text": "brain-openclaw is the OpenClaw plugin adapter for brain. It registers five native tools into OpenClaw agents: brain_recall, brain_push, brain_explore, brain_get, brain_remove.",
+      "entities": ["brain-openclaw", "openclaw", "brain"]
+    },
+    {
+      "type": "knowledge",
+      "text": "brain-openclaw wires a 30-minute flush cron (processes queue.jsonl → graph) and an after_compaction hook that records each session compaction as an experience node in the brain graph.",
+      "entities": ["brain-openclaw", "openclaw", "cron", "consolidation"]
+    },
+    {
+      "type": "knowledge",
+      "text": "In OpenClaw multi-agent setups, each agent has a separate BRAIN_DIR (e.g. ~/corpus/brain/karpathy, ~/corpus/brain/neo). The plugin sets BRAIN_DIR and BRAIN_AGENT_ID via environment variables per agent session.",
+      "entities": ["brain-openclaw", "openclaw", "multi-agent", "configuration"]
+    },
+    {
+      "type": "knowledge",
+      "text": "brain_recall should be called at session start and whenever a new topic comes up. brain_push should be called after completing tasks, making decisions, or learning durable facts. Do not wait for compaction — push immediately.",
+      "entities": ["brain-openclaw", "brain_recall", "brain_push", "workflow"]
+    }
+  ]
+}

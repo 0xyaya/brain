@@ -1,0 +1,45 @@
+{
+  "description": "System knowledge about brain — inject into all agent memories",
+  "nodes": [
+    {
+      "type": "knowledge",
+      "text": "Brain is a persistent memory system for AI agents. It stores knowledge and experiences in a graph database, recalls by hybrid vector + graph search, and maintains a MEMORY.md file rebuilt from the graph on every consolidation cycle.",
+      "entities": ["brain", "memory", "graph", "architecture"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Brain has three node types: Knowledge (what was learned — facts, decisions, concerns), Experience (what happened — tasks, sessions, outcomes), Entity (who/what — people, projects, tools, concepts). Edges wire them together with weights.",
+      "entities": ["brain", "schema", "architecture"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Brain recall is hybrid: vector similarity finds semantically close nodes, then graph traversal expands to connected siblings ranked by shared edge weight. Recalled edges grow stronger (+0.1 LTP). Unused edges decay weekly (×0.95). What matters rises naturally.",
+      "entities": ["brain", "recall", "architecture"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Brain push format: {type: 'knowledge'|'experience', text: '...', entities: ['topic', 'project', 'decision']}. Classification words like 'decision', 'risk', 'open', 'success' go in entities[] alongside real names — they become traversable graph axes.",
+      "entities": ["brain", "push", "schema"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Brain consolidation runs on a sleep-cycle model: light sleep every 30min (flush + focus + recent), deep sleep every 6h (summarize + permanent), REM weekly (ingest from daily logs + maintain edge decay + rebuild embeddings).",
+      "entities": ["brain", "consolidation", "architecture"]
+    },
+    {
+      "type": "knowledge",
+      "text": "MEMORY.md has three sections: Focus (top 5 nodes by centrality × recency decay), Recent (last 72h experiences and knowledge), Permanent (LLM synthesis of highest-centrality nodes). Never edit manually — rebuilt fresh on every consolidation.",
+      "entities": ["brain", "memory-md", "consolidation"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Brain uses BRAIN_DIR for isolation (default: ~/.brain). Each project gets its own BRAIN_DIR with its own brain.db, queue.jsonl, embeddings.json, and MEMORY.md. Agent ID defaults to current directory name.",
+      "entities": ["brain", "configuration", "isolation"]
+    },
+    {
+      "type": "knowledge",
+      "text": "Brain CLI: brain init, brain push, brain flush, brain recall, brain explore, brain get, brain remove, brain consolidate, brain ingest. MCP server at src/mcp.js for Claude Code, Cursor, Claude Desktop integration.",
+      "entities": ["brain", "cli", "mcp"]
+    }
+  ]
+}
