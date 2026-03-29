@@ -45,15 +45,26 @@ cd myproject && brain init
 
 `brain init` runs interactive prompts on first use and creates a `brain.json` in your project root. On subsequent runs it reads `brain.json` silently — no prompts.
 
+Always generates an `AGENTS.md` with shell command instructions — works for every agent out of the box.
+
 ```json
 {
   "projectName": "myapp",
-  "client": "claude",
   "brainDir": ".brain"
 }
 ```
 
-Supported clients: `claude`, `codex`, `cursor`, `opencode`, `other`.
+**Optional MCP** — add `"mcp"` to enable native tool calls for MCP-compatible clients:
+
+```json
+{
+  "projectName": "myapp",
+  "brainDir": ".brain",
+  "mcp": "claude"
+}
+```
+
+Supported MCP values: `"claude"` (`.mcp.json` + CLAUDE.md), `"cursor"` (`.cursor/mcp.json`), `"opencode"` (OPENCODE.md).
 
 ---
 
