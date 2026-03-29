@@ -43,6 +43,18 @@ cd brain && npm install && npm link
 cd myproject && brain init
 ```
 
+`brain init` runs interactive prompts on first use and creates a `brain.json` in your project root. On subsequent runs it reads `brain.json` silently — no prompts.
+
+```json
+{
+  "projectName": "myapp",
+  "client": "claude",
+  "brainDir": ".brain"
+}
+```
+
+Supported clients: `claude`, `codex`, `cursor`, `opencode`, `other`.
+
 ---
 
 ## Push

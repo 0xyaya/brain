@@ -3,6 +3,7 @@ import os from "os";
 import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
+import readline from "readline";
 
 // --- Config resolution ---
 const DEFAULT_BRAIN_DIR = path.join(os.homedir(), ".brain");
@@ -51,7 +52,7 @@ if (cmd === "--help" || cmd === "-h" || !cmd) {
   console.log(`brain — agent memory CLI
 
 Usage:
-  brain init                                             Initialize for this directory
+  brain init                                             Interactive setup (or reads brain.json if present)
   brain push [--buffer <file>] <json>                   Queue a knowledge/experience item
   brain push --graph <file>                             Queue a persona graph file
   brain flush [--buffer <file>]                         Flush queue to graph
@@ -434,45 +435,122 @@ switch (cmd) {
   }
 
   case "init": {
-    const agentId = resolveAgentId();
-    const dailyDir = path.join(BRAIN_DIR, "memory");
+    const CWD = process.cwd();
+    const brainJsonPath = path.join(CWD, "brain.json");
 
-    fs.mkdirSync(BRAIN_DIR, { recursive: true });
-    fs.mkdirSync(dailyDir, { recursive: true });
+    // Load brain.json if present, else run interactive prompts
+    let cfg;
+    if (fs.existsSync(brainJsonPath)) {
+      cfg = JSON.parse(fs.readFileSync(brainJsonPath, "utf-8"));
+      console.log(`✦ brain.json found — using config`);
+    } else {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const ask = (q, def) => new Promise(res => rl.question(`  ${q}${def ? ` (${def})` : ""}: `, a => res(a.trim() || def || "")));
 
-    const configPath = path.join(BRAIN_DIR, "config.json");
-    const config = { ...loadConfig(BRAIN_DIR), agentId };
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+      console.log(`\n  ✦ brain init\n`);
+      const projectName = await ask("Project name", path.basename(CWD));
+      console.log(`  Client:  1) claude  2) codex  3) cursor  4) opencode  5) other`);
+      const clientChoice = await ask("Choose", "1");
+      const clientMap = { "1": "claude", "2": "codex", "3": "cursor", "4": "opencode", "5": "other" };
+      const client = clientMap[clientChoice] || clientChoice;
+      const brainDir = await ask("Brain directory", ".brain");
 
-    const memoryMdPath = path.join(BRAIN_DIR, "MEMORY.md");
-    if (!fs.existsSync(memoryMdPath)) {
-      fs.writeFileSync(memoryMdPath, `# MEMORY.md — ${agentId}
+      cfg = { projectName, client, brainDir };
+      rl.close();
 
-<!-- BRAIN:FOCUS:START -->
-# Focus
-<!-- BRAIN:FOCUS:END -->
-
-<!-- BRAIN:RECENT:START -->
-# Recent
-<!-- BRAIN:RECENT:END -->
-
-<!-- BRAIN:PERMANENT:START -->
-# Permanent
-<!-- BRAIN:PERMANENT:END -->
-`);
+      fs.writeFileSync(brainJsonPath, JSON.stringify(cfg, null, 2));
+      console.log(`\n  ✓ Created brain.json`);
     }
 
-    console.log(`✓ Brain initialized`);
-    console.log(`  agent:      ${agentId}`);
-    console.log(`  brain DB:   ${BRAIN_DIR}`);
-    console.log(`  memory:     ${dailyDir}`);
-    console.log(`  MEMORY.md:  ${memoryMdPath}`);
-    console.log(``);
-    console.log(`Next steps:`);
-    console.log(`  brain push '{"type":"knowledge","text":"...","entities":["topic"]}'`);
-    console.log(`  brain flush`);
-    console.log(`  brain consolidate --embed`);
-    console.log(`  brain recall "test query"`);
+    const { projectName = path.basename(CWD), client = "other", brainDir: rawBrainDir = ".brain" } = cfg;
+    const resolvedBrainDir = path.isAbsolute(rawBrainDir)
+      ? rawBrainDir
+      : path.join(CWD, rawBrainDir);
+    const agentId = projectName.toLowerCase().replace(/[^a-z0-9]/g, "-");
+    const MCP_JS = path.join(BIN_DIR, "../src/mcp.js");
+
+    // --- Initialize brain DB ---
+    fs.mkdirSync(resolvedBrainDir, { recursive: true });
+    fs.mkdirSync(path.join(resolvedBrainDir, "memory"), { recursive: true });
+
+    const brainConfig = { agentId, brainDir: resolvedBrainDir };
+    fs.writeFileSync(path.join(resolvedBrainDir, "config.json"), JSON.stringify(brainConfig, null, 2));
+
+    const memoryMdPath = path.join(resolvedBrainDir, "MEMORY.md");
+    if (!fs.existsSync(memoryMdPath)) {
+      fs.writeFileSync(memoryMdPath, `# MEMORY.md — ${projectName}\n\n<!-- BRAIN:FOCUS:START -->\n# Focus\n<!-- BRAIN:FOCUS:END -->\n\n<!-- BRAIN:RECENT:START -->\n# Recent\n<!-- BRAIN:RECENT:END -->\n\n<!-- BRAIN:PERMANENT:START -->\n# Permanent\n<!-- BRAIN:PERMANENT:END -->\n`);
+    }
+
+    // --- Per-client integration files ---
+    const created = [];
+
+    if (client === "claude") {
+      // .mcp.json
+      const mcpPath = path.join(CWD, ".mcp.json");
+      const existing = fs.existsSync(mcpPath) ? JSON.parse(fs.readFileSync(mcpPath, "utf-8")) : {};
+      existing.mcpServers = existing.mcpServers || {};
+      existing.mcpServers.brain = {
+        command: "node",
+        args: [MCP_JS],
+        env: { BRAIN_DIR: resolvedBrainDir }
+      };
+      fs.writeFileSync(mcpPath, JSON.stringify(existing, null, 2));
+      created.push(".mcp.json");
+
+      // CLAUDE.md snippet
+      const claudeMdPath = path.join(CWD, "CLAUDE.md");
+      const snippet = `\n## Memory (brain)\n\nUse brain tools to maintain persistent memory across sessions.\n\n- **At session start**: call \`brain_recall\` with the current task or topic to prime context\n- **After completing tasks**: call \`brain_push\` with what happened and what was decided\n- **Push format**: \`{"type":"knowledge","text":"...","entities":["topic","decision"]}\`\n- **Bad/stale nodes**: use \`brain_remove <id>\` — MEMORY.md self-heals\n`;
+      if (!fs.existsSync(claudeMdPath)) {
+        fs.writeFileSync(claudeMdPath, `# ${projectName}${snippet}`);
+      } else if (!fs.readFileSync(claudeMdPath, "utf-8").includes("brain_recall")) {
+        fs.appendFileSync(claudeMdPath, snippet);
+      }
+      created.push("CLAUDE.md (brain snippet)");
+    }
+
+    if (client === "codex") {
+      const agentsMdPath = path.join(CWD, "AGENTS.md");
+      const snippet = `\n## Memory (brain)\n\nUse brain CLI for persistent memory across sessions.\n\n- **At session start**: run \`brain recall "current task"\` to prime context\n- **After tasks/decisions**: run \`brain push '{"type":"knowledge","text":"...","entities":["topic"]}'\`\n- **Flush queue**: run \`brain flush\` before ending a session\n- **BRAIN_DIR**: \`${resolvedBrainDir}\`\n`;
+      if (!fs.existsSync(agentsMdPath)) {
+        fs.writeFileSync(agentsMdPath, `# ${projectName}${snippet}`);
+      } else if (!fs.readFileSync(agentsMdPath, "utf-8").includes("brain recall")) {
+        fs.appendFileSync(agentsMdPath, snippet);
+      }
+      created.push("AGENTS.md (brain snippet)");
+    }
+
+    if (client === "cursor") {
+      const cursorDir = path.join(CWD, ".cursor");
+      fs.mkdirSync(cursorDir, { recursive: true });
+      const mcpPath = path.join(cursorDir, "mcp.json");
+      const existing = fs.existsSync(mcpPath) ? JSON.parse(fs.readFileSync(mcpPath, "utf-8")) : {};
+      existing.mcpServers = existing.mcpServers || {};
+      existing.mcpServers.brain = { command: "node", args: [MCP_JS], env: { BRAIN_DIR: resolvedBrainDir } };
+      fs.writeFileSync(mcpPath, JSON.stringify(existing, null, 2));
+      created.push(".cursor/mcp.json");
+    }
+
+    if (client === "opencode") {
+      const opencodeMdPath = path.join(CWD, "OPENCODE.md");
+      const snippet = `\n## Memory (brain)\n\nUse brain CLI for persistent memory.\n\n- **At session start**: \`brain recall "current task"\`\n- **After tasks**: \`brain push '{"type":"knowledge","text":"...","entities":["topic"]}'\`\n- **BRAIN_DIR**: \`${resolvedBrainDir}\`\n`;
+      if (!fs.existsSync(opencodeMdPath)) {
+        fs.writeFileSync(opencodeMdPath, `# ${projectName}${snippet}`);
+      } else if (!fs.readFileSync(opencodeMdPath, "utf-8").includes("brain recall")) {
+        fs.appendFileSync(opencodeMdPath, snippet);
+      }
+      created.push("OPENCODE.md (brain snippet)");
+    }
+
+    console.log(`\n  ✓ ${projectName} — brain initialized`);
+    console.log(`  client:     ${client}`);
+    console.log(`  brain dir:  ${resolvedBrainDir}`);
+    console.log(`  agent ID:   ${agentId}`);
+    for (const f of created) console.log(`  created:    ${f}`);
+    console.log(`\n  Next steps:`);
+    console.log(`    brain push '{"type":"knowledge","text":"...","entities":["topic"]}'`);
+    console.log(`    brain flush`);
+    console.log(`    brain consolidate --embed`);
+    console.log(`    brain recall "test query"`);
     break;
   }
 
