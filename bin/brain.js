@@ -526,6 +526,19 @@ switch (cmd) {
       created.push(path.relative(CWD, claudeMdPath) + " (brain snippet appended)");
     }
 
+    // --- .mcp.json: register brain MCP server for Claude Code ---
+    const mcpJsonPath = path.join(CWD, ".mcp.json");
+    const BRAIN_MCP = path.join(BIN_DIR, "../src/mcp.js");
+    const mcpExisting = fs.existsSync(mcpJsonPath) ? JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8")) : {};
+    mcpExisting.mcpServers = mcpExisting.mcpServers || {};
+    mcpExisting.mcpServers.brain = {
+      command: "node",
+      args: [BRAIN_MCP],
+      env: { BRAIN_DIR: resolvedBrainDir }
+    };
+    fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpExisting, null, 2));
+    created.push(".mcp.json");
+
     // --- Claude Code hooks: wire Stop + PostToolUse into .claude/settings.local.json (project-level, personal) ---
     const claudeSettingsPath = path.join(CWD, ".claude", "settings.local.json");
     try {
