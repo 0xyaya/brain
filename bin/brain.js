@@ -525,14 +525,21 @@ switch (cmd) {
       settings.hooks = settings.hooks || {};
 
       // PostToolUse: flush queue after every tool call
+      // Claude Code hook format: { matcher: "", hooks: [{ type: "command", command: "..." }] }
       settings.hooks.PostToolUse = settings.hooks.PostToolUse || [];
-      const hasFlush = settings.hooks.PostToolUse.some(h => h.command?.includes(resolvedBrainDir) && h.command?.includes("flush"));
-      if (!hasFlush) settings.hooks.PostToolUse.push({ command: flushCmd });
+      const hasFlush = settings.hooks.PostToolUse.some(h => h.hooks?.[0]?.command?.includes(resolvedBrainDir));
+      if (!hasFlush) settings.hooks.PostToolUse.push({
+        matcher: "",
+        hooks: [{ type: "command", command: flushCmd }]
+      });
 
       // Stop: flush + consolidate when session ends
       settings.hooks.Stop = settings.hooks.Stop || [];
-      const hasStop = settings.hooks.Stop.some(h => h.command?.includes(resolvedBrainDir));
-      if (!hasStop) settings.hooks.Stop.push({ command: `${flushCmd} && ${consolidateCmd} --embed` });
+      const hasStop = settings.hooks.Stop.some(h => h.hooks?.[0]?.command?.includes(resolvedBrainDir));
+      if (!hasStop) settings.hooks.Stop.push({
+        matcher: "",
+        hooks: [{ type: "command", command: `${flushCmd} && ${consolidateCmd} --embed` }]
+      });
 
       fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
       fs.writeFileSync(claudeSettingsPath, JSON.stringify(settings, null, 2));
