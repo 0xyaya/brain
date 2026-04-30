@@ -46,7 +46,7 @@ fn resolve_claude_memory(home: &Path) -> Option<PathBuf> {
     let cwd_str = cwd.to_str()?;
     // Claude Code encodes cwd by replacing each '/' with '-'. An absolute path
     // already starts with '/', so the result has a single leading '-' (e.g.
-    // /Users/yann/dev/brain -> -Users-yann-dev-brain). Do not prepend another '-'.
+    // /Users/<u>/dev/brain -> -Users-<u>-dev-brain). Do not prepend another '-'.
     let encoded = cwd_str.replace('/', "-");
     let candidate = home.join(".claude/projects").join(&encoded).join("memory");
     if candidate.exists() { Some(candidate) } else { None }

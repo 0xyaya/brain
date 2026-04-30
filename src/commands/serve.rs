@@ -58,7 +58,7 @@ impl BrainServer {
     }
 
     #[tool(
-        description = "Discover what's in the brain. Call with no args at session start to learn the folder layout, mounted sources, and Yann's identity (areas/user.md). Pass `project` to also include the matching projects/<project>.md."
+        description = "Discover what's in the brain. Call with no args at session start to learn the folder layout, mounted sources, and the user's identity (areas/user.md). Pass `project` to also include the matching projects/<project>.md."
     )]
     async fn brain_context(
         &self,
@@ -74,10 +74,10 @@ impl BrainServer {
         out.push_str("- `archive/`   inactive (human-curated; never written via brain_remember)\n");
         out.push_str("- `sources/`   read-only mounted external markdown\n\n");
 
-        // Yann's identity
+        // user identity
         let user_md = self.brain.home.join("areas").join("user.md");
         if user_md.is_file() {
-            out.push_str("## Yann (from areas/user.md)\n\n");
+            out.push_str("## User identity (from areas/user.md)\n\n");
             match std::fs::read_to_string(&user_md) {
                 Ok(s) => {
                     out.push_str(&s);
@@ -89,7 +89,7 @@ impl BrainServer {
             }
             out.push('\n');
         } else {
-            out.push_str("## Yann\n_areas/user.md does not exist yet. Ask Yann to write one._\n\n");
+            out.push_str("## User identity\n_areas/user.md does not exist yet. Ask the user to write one._\n\n");
         }
 
         // Mounted sources
@@ -143,10 +143,10 @@ impl BrainServer {
 
         out.push_str("## How to use\n");
         out.push_str("- **Read**: `brain_read(path)` for any file. Paths relative to the brain home; symlinks into sources/ are followed.\n");
-        out.push_str("- **Write for Yann**: `brain_remember(category, content, project?)`. category ∈ {projects, areas, resources}. Append-only with auto-attribution.\n");
+        out.push_str("- **Write for the user**: `brain_remember(category, content, project?)`. category ∈ {projects, areas, resources}. Append-only with auto-attribution.\n");
         out.push_str("- **List sources**: `brain_list_sources()` returns structured JSON.\n");
         out.push_str("- **Never** write to `sources/` (foreign territory) or `archive/` (human-curated).\n");
-        out.push_str("- **Agent self-memory** (your own identity, daily notes) belongs in your tool's own store, not in brain. brain is Yann's brain; you are a guest.\n");
+        out.push_str("- **Agent self-memory** (your own identity, daily notes) belongs in your tool's own store, not in brain. brain is the user's brain; you are a guest.\n");
 
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
@@ -172,7 +172,7 @@ impl BrainServer {
     }
 
     #[tool(
-        description = "Append a markdown note to a PARA bucket on Yann's behalf. Append-only; never overwrites. Auto-prepends a metadata header (timestamp, provenance). category MUST be \"projects\", \"areas\", or \"resources\" — \"archive\" and \"sources\" are rejected. Returns JSON: {path, bytes_written, created}."
+        description = "Append a markdown note to a PARA bucket on the user's behalf. Append-only; never overwrites. Auto-prepends a metadata header (timestamp, provenance). category MUST be \"projects\", \"areas\", or \"resources\" — \"archive\" and \"sources\" are rejected. Returns JSON: {path, bytes_written, created}."
     )]
     async fn brain_remember(
         &self,
@@ -313,12 +313,12 @@ impl ServerHandler for BrainServer {
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "brain — Yann's MCP-served second brain. \
-                 Call brain_context first at session start to learn the layout, mounted sources, and Yann's identity. \
+                "brain — the user's MCP-served second brain. \
+                 Call brain_context first at session start to learn the layout, mounted sources, and the user's identity. \
                  Use brain_read for any file (sources are followed transparently via symlinks). \
-                 Use brain_remember to deposit notes for Yann (append-only, PARA-typed). \
+                 Use brain_remember to deposit notes for the user (append-only, PARA-typed). \
                  Use brain_list_sources for structured source enumeration. \
-                 brain is Yann's brain; agents are guests acting on his behalf."
+                 brain is the user's brain; agents are guests acting on the user's behalf."
                     .to_string(),
             )
     }

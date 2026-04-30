@@ -1,85 +1,70 @@
-# brain
+# parabrain
 
-MCP-served aggregator of AI artifacts. A PARA-structured second brain that mounts Claude Code, gstack, and other AI-tool memory via symlink sources.
+> A second brain for your AI agents — yours, not theirs.
 
-## Why
-
-If you run Claude Code + gstack (or similar AI dev tooling), you're already generating valuable markdown across `~/.claude/`, `~/.gstack/`, `~/.openclaw/`, and project-local files. brain aggregates them into one PARA-organized folder you can query, snapshot, and (in v0.3) serve over MCP.
-
-brain is **your** second brain — agents are guests acting on your behalf. Agents read everything via MCP and write to PARA buckets via `brain_remember` (v0.3). They never write to `sources/` or to each other's stores.
+PARA-structured markdown at `~/brain/`, plus symlinks to whatever external memory you want surfaced (Claude Code, gstack, Obsidian, anything). Exposed over MCP so every agent on your machine reads and writes to the same place.
 
 ## Install
 
 ```sh
 cargo install brainmd
+brain init
 ```
 
-The crate is `brainmd`; the installed binary is `brain`.
+The crate is `brainmd`. The binary is `brain`. `brain init` scaffolds `~/brain/` and auto-mounts the AI-tool memory it finds on your system.
 
-## Usage
+## Wire it into Claude Code
 
 ```sh
-brain init                          # scaffold ~/brain (PARA + sources, with auto-mounts)
-brain doctor                        # validate folder + report broken sources
-brain source list                   # enumerate mounted sources
-brain source add <NAME> <PATH>      # symlink an external markdown dir
-brain source remove <NAME>          # unmount (never deletes the target)
-brain snapshot --out brain.tar.zst  # portable archive
-brain serve                         # run as MCP server over stdio (v0.2)
+claude mcp add brain -s user -- $(which brain) serve
 ```
 
-## MCP server (v0.2)
+Append to `~/.claude/CLAUDE.md` so every session knows brain exists:
 
-`brain serve` exposes brain as an MCP server. Register it once with Claude Code and every session has structured access.
-
-```sh
-claude mcp add brain -s user -- /full/path/to/brain serve
+```markdown
+## brain
+Personal second brain over MCP. Call `brain_context` first when the
+user asks anything that depends on cross-session context. Use
+`brain_remember` to save notes for them.
 ```
 
-Use the full absolute path (`which brain`) so the spawned subprocess always finds the binary.
+Open a new Claude Code session and ask *"what's in my brain?"*
 
-**Tools exposed:**
-- `brain_context(project?)` — discovery surface. Returns layout, mounted sources, `areas/user.md` content, and an optional project file. Call this first at session start.
-- `brain_read(path)` — read any file under the brain (relative or absolute path; symlinks into mounted sources are followed transparently). Refuses path traversal.
-- `brain_remember(category, content, project?)` — append-only deposit to a PARA bucket on Yann's behalf. `category` ∈ `{projects, areas, resources}`. Auto-prepends a metadata header (timestamp, provenance). Returns JSON `{path, bytes_written, created}`.
-- `brain_list_sources()` — JSON enumeration of mounted sources: `[{name, target, broken}, ...]`.
-
-**Ownership model:** brain is *Yann's* brain — agents are guests acting on his behalf. `brain_remember` always deposits **for Yann** (PARA-typed, never to `archive/` or `sources/`). Agent self-memory (identity, beliefs, daily journal) belongs in each agent's own tool, not brain.
-
-## Folder layout
+## Folder
 
 ```
 ~/brain/
-├── projects/    # PARA: active work with deadlines
-├── areas/       # PARA: ongoing responsibilities
-├── resources/   # PARA: reference material, topics of interest
-├── archive/     # PARA: inactive items
-└── sources/     # symlinked external dirs (read-only mounts)
+├── projects/    # active work
+├── areas/       # responsibilities (areas/user.md is your identity)
+├── resources/   # reference
+├── archive/     # inactive
+└── sources/     # symlinks to external markdown
 ```
 
-`brain init` auto-mounts these when present:
+The four buckets follow Tiago Forte's [PARA](https://fortelabs.com/blog/para/) note-organization scheme. `sources/` is the extension point — `brain source add NAME PATH` mounts any markdown directory.
 
-| Mount | Source path |
-| --- | --- |
-| `gstack-projects` | `~/.gstack/projects/` |
-| `claude-memory` | `~/.claude/projects/<encoded-cwd>/memory/` |
-| `builder-journey.md` | `~/.gstack/builder-journey.md` |
+## Tools (MCP)
 
-Mounts are skipped silently with a stderr note when the target is absent. Add others with `brain source add`.
+- **`brain_context(project?)`** — discovery: layout, mounted sources, your identity, optional project file. Call first when context matters.
+- **`brain_read(path)`** — read any file under the brain. Symlinks into mounted sources are followed transparently.
+- **`brain_remember(category, content, project?)`** — append-only deposit to a PARA bucket. Never overwrites; never writes to `archive/` or `sources/`. Each write gets a metadata header (timestamp + provenance).
+- **`brain_list_sources()`** — JSON enumeration of mounted external memory.
 
-## Configuration
+## CLI
 
-- `BRAIN_HOME` — where the brain folder lives. Defaults to `~/brain`.
+```sh
+brain doctor            # validate folder + check for broken symlinks
+brain source list       # show mounted memory
+brain source add        # mount a markdown directory
+brain source remove     # unmount (never deletes the target)
+brain snapshot          # portable .tar.zst archive
+brain serve             # MCP server over stdio
+```
 
-## What's coming
+## Ownership
 
-- **v0.3**: Homebrew tap, manifest-augmented sources (descriptions, hostname-namespacing, indexed-at).
-- **v0.4+**: optional [qmd](https://github.com/tobi/qmd) companion for semantic search; brain detects qmd at runtime, falls back to ripgrep when absent.
+Brain is yours. Agents are guests. They read what you mount and save notes for you via `brain_remember` — but their own identity, beliefs, and daily journal live in their own tool's store, never in brain.
 
 ## Status
 
-v0.2 — MCP server over stdio, plus the v0.1 surface. Unix-only (macOS + Linux). Windows is fast-fail.
-
-## License
-
-MIT
+v0.2. Unix only (macOS, Linux). MIT.
