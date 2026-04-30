@@ -41,6 +41,9 @@ enum Command {
         #[command(subcommand)]
         action: SourceAction,
     },
+    /// Run brain as an MCP server over stdio.
+    /// Wire this into your Claude Code MCP config to expose brain to agents.
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -79,6 +82,7 @@ impl Cli {
                 SourceAction::List => commands::source::list(&brain),
                 SourceAction::Remove { name } => commands::source::remove(&brain, &name),
             },
+            Command::Serve => commands::serve::run(brain),
         }
     }
 }

@@ -19,13 +19,32 @@ The crate is `brainmd`; the installed binary is `brain`.
 ## Usage
 
 ```sh
-brain init                    # scaffold ~/brain (PARA + sources, with auto-mounts)
-brain doctor                  # validate folder + report broken sources
-brain source list             # enumerate mounted sources
-brain source add <NAME> <PATH>  # symlink an external markdown dir
-brain source remove <NAME>    # unmount (never deletes the target)
+brain init                          # scaffold ~/brain (PARA + sources, with auto-mounts)
+brain doctor                        # validate folder + report broken sources
+brain source list                   # enumerate mounted sources
+brain source add <NAME> <PATH>      # symlink an external markdown dir
+brain source remove <NAME>          # unmount (never deletes the target)
 brain snapshot --out brain.tar.zst  # portable archive
+brain serve                         # run as MCP server over stdio (v0.2)
 ```
+
+## MCP server (v0.2)
+
+`brain serve` exposes brain as an MCP server. Register it once with Claude Code and every session has structured access.
+
+```sh
+claude mcp add brain -s user -- /full/path/to/brain serve
+```
+
+Use the full absolute path (`which brain`) so the spawned subprocess always finds the binary.
+
+**Tools exposed:**
+- `brain_context(project?)` — discovery surface. Returns layout, mounted sources, `areas/user.md` content, and an optional project file. Call this first at session start.
+- `brain_read(path)` — read any file under the brain (relative or absolute path; symlinks into mounted sources are followed transparently). Refuses path traversal.
+- `brain_remember(category, content, project?)` — append-only deposit to a PARA bucket on Yann's behalf. `category` ∈ `{projects, areas, resources}`. Auto-prepends a metadata header (timestamp, provenance). Returns JSON `{path, bytes_written, created}`.
+- `brain_list_sources()` — JSON enumeration of mounted sources: `[{name, target, broken}, ...]`.
+
+**Ownership model:** brain is *Yann's* brain — agents are guests acting on his behalf. `brain_remember` always deposits **for Yann** (PARA-typed, never to `archive/` or `sources/`). Agent self-memory (identity, beliefs, daily journal) belongs in each agent's own tool, not brain.
 
 ## Folder layout
 
@@ -54,12 +73,12 @@ Mounts are skipped silently with a stderr note when the target is absent. Add ot
 
 ## What's coming
 
-- **v0.2**: Homebrew tap, manifest-augmented sources (descriptions, hostname-namespacing).
-- **v0.3**: `brain serve` — MCP server with `brain_context`, `brain_read`, `brain_remember`, `brain_list_sources`. Search composed via [qmd](https://github.com/tobi/qmd) when installed.
+- **v0.3**: Homebrew tap, manifest-augmented sources (descriptions, hostname-namespacing, indexed-at).
+- **v0.4+**: optional [qmd](https://github.com/tobi/qmd) companion for semantic search; brain detects qmd at runtime, falls back to ripgrep when absent.
 
 ## Status
 
-v0.1 — Unix-only. macOS and Linux supported. Windows is fast-fail.
+v0.2 — MCP server over stdio, plus the v0.1 surface. Unix-only (macOS + Linux). Windows is fast-fail.
 
 ## License
 
