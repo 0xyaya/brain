@@ -1,0 +1,30 @@
+[package]
+name = "brainmd"
+version = "0.1.0"
+edition = "2024"
+description = "MCP-served aggregator of AI artifacts. PARA-structured second brain that mounts Claude Code, gstack, and other AI-tool memory via symlink sources."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/0xyaya/brain"
+keywords = ["mcp", "para", "second-brain", "ai-tools", "knowledge-management"]
+categories = ["command-line-utilities", "filesystem"]
+
+[[bin]]
+name = "brain"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+walkdir = "2.5"
+tar = "0.4"
+zstd = "0.13"
+urlencoding = "2.1"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

@@ -1,0 +1,7 @@
+/target
+
+# private workflow artifacts (gstack / claude code session state)
+/.gstack/
+/.claude/
+/CONTEXT.md
+/TODOS.md
