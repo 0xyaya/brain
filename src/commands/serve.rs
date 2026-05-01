@@ -12,6 +12,7 @@ use rmcp::{
 };
 
 use crate::brain::{Brain, PARA_WRITABLE};
+use brainmd::search_backend::{SearchOptions, parse_mode, pick_backend};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct BrainContextArgs {
@@ -25,6 +26,18 @@ pub struct BrainReadArgs {
     /// Path relative to the brain home (e.g. "areas/user.md", "sources/gstack-projects/foo.md").
     /// Absolute paths are accepted but must resolve within the brain home.
     pub path: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BrainSearchArgs {
+    /// Search query string. Empty queries return no hits.
+    pub query: String,
+    /// Optional brain-relative path prefix to filter results (e.g. "projects" or "areas/user").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Search mode: "hybrid" (default), "fast" (BM25), or "semantic" (vectors). Ignored on ripgrep fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -234,6 +247,43 @@ impl BrainServer {
             "path": target.to_string_lossy(),
             "bytes_written": bytes_written,
             "created": created,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(response.to_string())]))
+    }
+
+    #[tool(
+        description = "Search the brain corpus. `query` is a free-text search string. `scope` is an optional brain-relative path prefix (e.g. \"projects\" or \"areas/user\"). `mode` is \"hybrid\" (default; semantic + keyword + rerank), \"fast\" (BM25 keyword), or \"semantic\" (vector similarity). When qmd is unavailable, brain falls back to ripgrep keyword search and all modes silently degrade to \"fast\". Returns JSON: {hits: [{path, score, title, snippet, source}], backend, mode}."
+    )]
+    async fn brain_search(
+        &self,
+        Parameters(args): Parameters<BrainSearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mode = parse_mode(args.mode.as_deref())
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let backend = pick_backend(self.brain.home.clone());
+        let opts = SearchOptions {
+            query: &args.query,
+            mode,
+            scope: args.scope.as_deref(),
+            top_n: 10,
+        };
+
+        let hits = backend.search(&opts).await.map_err(|e| {
+            McpError::internal_error(format!("search via {}: {e}", backend.name()), None)
+        })?;
+
+        let mode_str = match mode {
+            brainmd::search_backend::SearchMode::Hybrid => "hybrid",
+            brainmd::search_backend::SearchMode::Fast => "fast",
+            brainmd::search_backend::SearchMode::Semantic => "semantic",
+        };
+
+        let response = serde_json::json!({
+            "hits": hits,
+            "backend": backend.name(),
+            "mode": mode_str,
         });
 
         Ok(CallToolResult::success(vec![Content::text(response.to_string())]))

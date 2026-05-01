@@ -9,6 +9,10 @@ repository = "https://github.com/0xyaya/brain"
 keywords = ["mcp", "para", "second-brain", "ai-tools", "knowledge-management"]
 categories = ["command-line-utilities", "filesystem"]
 
+[lib]
+name = "brainmd"
+path = "src/lib.rs"
+
 [[bin]]
 name = "brain"
 path = "src/main.rs"
@@ -32,9 +36,12 @@ schemars = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+async-trait = "0.1"
+which = "6"
 
 [dev-dependencies]
 tempfile = "3.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [profile.release]
 strip = true
