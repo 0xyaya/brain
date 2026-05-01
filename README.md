@@ -56,12 +56,7 @@ The four buckets follow Tiago Forte's [PARA](https://fortelabs.com/blog/para/) n
 
 `brain_search` ranks across your whole brain — PARA buckets and every mounted source. Two backends, picked at request time:
 
-- **qmd (recommended)** — semantic + BM25 + reranking. Install with `npm install -g @tobilu/qmd`, then bootstrap a collection over `~/brain/`:
-  ```sh
-  qmd collection add ~/brain --name brain
-  qmd embed
-  ```
-  `brain serve` runs a background worker that re-runs `qmd update && qmd embed` every ~5s when `brain_remember` writes happen. Freshness lag is reported by `brain doctor`.
+- **qmd (recommended)** — semantic + BM25 + reranking. Install with `npm install -g @tobilu/qmd`, then `brain init` registers the collection automatically. First run needs one `qmd embed` to generate vectors (~30s + a 333MB model download). After that, `brain serve` runs a background worker that re-runs `qmd update && qmd embed` every ~5s when `brain_remember` writes happen. Freshness lag is reported by `brain doctor`.
 - **ripgrep fallback** — keyword-only. No setup; degrades all modes silently to `fast`. Used automatically when `qmd` is not on PATH.
 
 `BRAIN_INDEX_INTERVAL` (default `5`, range `1..=60`) overrides the worker cadence. `brain index sync` force-drains from the CLI when `brain serve` isn't running.
