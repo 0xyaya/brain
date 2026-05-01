@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
 use crate::brain::Brain;
+use brainmd::qmd_collection::{self, RegisterOutcome, qmd_available};
 
 pub fn add(brain: &Brain, name: &str, target: &Path, force: bool) -> Result<()> {
     validate_name(name)?;
@@ -36,6 +37,27 @@ pub fn add(brain: &Brain, name: &str, target: &Path, force: bool) -> Result<()> 
         format!("symlink {} -> {}", dest.display(), canonical_target.display())
     })?;
     println!("Mounted {} -> {}", name, canonical_target.display());
+
+    if qmd_available() {
+        match qmd_collection::register(&canonical_target, name) {
+            Ok(RegisterOutcome::Created) => {
+                println!("  ✓ Registered qmd collection '{name}' over {}", canonical_target.display());
+                println!("  i Run `qmd embed` to generate vector embeddings for the new source.");
+            }
+            Ok(RegisterOutcome::AlreadyMatches) => {
+                println!("  ✓ qmd collection '{name}' already registered");
+            }
+            Ok(RegisterOutcome::Conflict { existing }) => {
+                eprintln!(
+                    "  ! qmd collection '{name}' is registered to {} — pointing it at {} would conflict.",
+                    existing.display(),
+                    canonical_target.display()
+                );
+                eprintln!("    Run `qmd collection remove {name}` first to let this brain own that name.");
+            }
+            Err(e) => eprintln!("  ! qmd collection add for '{name}' failed: {e}"),
+        }
+    }
     Ok(())
 }
 
@@ -97,6 +119,14 @@ pub fn remove(brain: &Brain, name: &str) -> Result<()> {
     }
     std::fs::remove_file(&dest).with_context(|| format!("removing {}", dest.display()))?;
     println!("Unmounted {}", name);
+
+    if qmd_available() {
+        match qmd_collection::unregister(name) {
+            Ok(true) => println!("  ✓ Removed qmd collection '{name}'"),
+            Ok(false) => {}
+            Err(e) => eprintln!("  ! qmd collection remove for '{name}' failed: {e}"),
+        }
+    }
     Ok(())
 }
 

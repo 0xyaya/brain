@@ -7,8 +7,16 @@ use tempfile::TempDir;
 const BRAIN_BIN: &str = env!("CARGO_BIN_EXE_brain");
 
 fn run(brain_home: &Path, args: &[&str]) -> std::process::Output {
+    // Scope qmd to per-test paths: INDEX_PATH controls the SQLite DB, QMD_CONFIG_DIR
+    // controls the YAML collection registry. Both are needed for full isolation.
+    let parent = brain_home.parent().unwrap_or(brain_home);
+    let qmd_index = parent.join("qmd-index.sqlite");
+    let qmd_config = parent.join("qmd-config");
+    let _ = fs::create_dir_all(&qmd_config);
     Command::new(BRAIN_BIN)
         .env("BRAIN_HOME", brain_home)
+        .env("INDEX_PATH", qmd_index)
+        .env("QMD_CONFIG_DIR", qmd_config)
         .args(args)
         .output()
         .expect("failed to invoke brain binary")

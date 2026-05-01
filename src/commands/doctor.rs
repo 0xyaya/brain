@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use brainmd::index_dirty::{self, LagStatus};
+use brainmd::qmd_collection::{self, BRAIN_COLLECTION};
 
 use crate::brain::{Brain, TOP_LEVEL_DIRS};
 
@@ -70,6 +71,8 @@ pub fn run(brain: &Brain) -> Result<()> {
             }
             _ => println!("  ✓ qmd on PATH (version probe failed)"),
         }
+
+        issues += check_qmd_collections(brain);
     } else {
         println!("  i qmd not found. For semantic search in v0.3: see https://github.com/tobi/qmd");
     }
@@ -95,6 +98,57 @@ pub fn run(brain: &Brain) -> Result<()> {
         println!("\n{} issue(s) found.", issues);
     }
     Ok(())
+}
+
+fn check_qmd_collections(brain: &Brain) -> u32 {
+    let mut issues = 0u32;
+    let brain_canonical = brain.home.canonicalize().unwrap_or_else(|_| brain.home.clone());
+    match qmd_collection::collection_path(BRAIN_COLLECTION) {
+        Some(p) if p.canonicalize().unwrap_or(p.clone()) == brain_canonical => {
+            println!("  ✓ qmd collection 'brain' → {}", brain.home.display());
+        }
+        Some(p) => {
+            println!(
+                "  ! qmd collection 'brain' is registered to {} (this brain is at {})",
+                p.display(),
+                brain.home.display()
+            );
+            issues += 1;
+        }
+        None => {
+            println!("  ! qmd collection 'brain' not registered. Fix: brain init --force");
+            issues += 1;
+        }
+    }
+    for name in qmd_collection::mounted_source_names(&brain.sources_dir()) {
+        let dest = brain.sources_dir().join(&name);
+        let target = match std::fs::read_link(&dest) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let target_canonical = target.canonicalize().unwrap_or_else(|_| target.clone());
+        match qmd_collection::collection_path(&name) {
+            Some(p) if p.canonicalize().unwrap_or(p.clone()) == target_canonical => {
+                println!("  ✓ qmd collection '{name}' → {}", target.display());
+            }
+            Some(p) => {
+                println!(
+                    "  ! qmd collection '{name}' is registered to {} (source target is {})",
+                    p.display(),
+                    target.display()
+                );
+                issues += 1;
+            }
+            None => {
+                println!(
+                    "  ! qmd collection '{name}' not registered. Fix: brain source add {name} {} --force",
+                    target.display()
+                );
+                issues += 1;
+            }
+        }
+    }
+    issues
 }
 
 fn has_command(name: &str) -> bool {

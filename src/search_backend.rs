@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::process::Command;
 
+use crate::qmd_collection::mounted_source_names;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchMode {
     #[default]
@@ -54,13 +56,18 @@ const QMD_TOP_K: usize = 50;
 const BRAIN_COLLECTION: &str = "brain";
 
 pub struct QmdBackend {
-    #[allow(dead_code)]
     brain_home: PathBuf,
 }
 
 impl QmdBackend {
     pub fn new(brain_home: PathBuf) -> Self {
         Self { brain_home }
+    }
+
+    fn collection_filters(&self) -> Vec<String> {
+        let mut names = vec![BRAIN_COLLECTION.to_string()];
+        names.extend(mounted_source_names(&self.brain_home.join("sources")));
+        names
     }
 }
 
@@ -90,7 +97,12 @@ pub fn extract_qmd_json_array(stdout: &str) -> Option<&str> {
     Some(stdout[start..].trim())
 }
 
-pub fn qmd_uri_to_path(uri: &str) -> String {
+/// Translate a `qmd://<collection>/<path>` URI to a brain-relative path.
+///   * `qmd://brain/projects/foo.md`        → `projects/foo.md`
+///   * `qmd://gstack-projects/foo/bar.md`   → `sources/gstack-projects/foo/bar.md`
+///     (when `gstack-projects` is in `known_sources`)
+///   * Anything else → raw URI unchanged.
+pub fn qmd_uri_to_path_with_sources(uri: &str, known_sources: &[String]) -> String {
     let Some(rest) = uri.strip_prefix("qmd://") else {
         return uri.to_string();
     };
@@ -98,10 +110,16 @@ pub fn qmd_uri_to_path(uri: &str) -> String {
         return uri.to_string();
     };
     if collection == BRAIN_COLLECTION {
-        path.to_string()
-    } else {
-        uri.to_string()
+        return path.to_string();
     }
+    if known_sources.iter().any(|n| n == collection) {
+        return format!("sources/{collection}/{path}");
+    }
+    uri.to_string()
+}
+
+pub fn qmd_uri_to_path(uri: &str) -> String {
+    qmd_uri_to_path_with_sources(uri, &[])
 }
 
 #[async_trait]
@@ -116,10 +134,14 @@ impl SearchBackend for QmdBackend {
             SearchMode::Semantic => "vsearch",
         };
 
-        let output = Command::new("qmd")
-            .arg(subcommand)
-            .arg("--json")
-            .arg(opts.query)
+        let collections = self.collection_filters();
+        let mut cmd = Command::new("qmd");
+        cmd.arg(subcommand);
+        for c in &collections {
+            cmd.arg("-c").arg(c);
+        }
+        cmd.arg("--json").arg(opts.query);
+        let output = cmd
             .output()
             .await
             .with_context(|| format!("failed to spawn qmd {subcommand}"))?;
@@ -151,7 +173,7 @@ impl SearchBackend for QmdBackend {
             .filter_map(|r| {
                 let raw_path = r.file?;
                 Some(SearchHit {
-                    path: qmd_uri_to_path(&raw_path),
+                    path: qmd_uri_to_path_with_sources(&raw_path, &collections),
                     score: r.score.unwrap_or(0.0),
                     title: r.title,
                     snippet: r.snippet.unwrap_or_default(),

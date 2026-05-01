@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, anyhow};
 use std::fs;
-use std::process::Command;
+use std::path::Path;
 
 use crate::auto_mount;
 use crate::brain::Brain;
-
-const QMD_COLLECTION_NAME: &str = "brain";
+use brainmd::qmd_collection::{
+    self, BRAIN_COLLECTION, RegisterOutcome, mounted_source_names, qmd_available,
+};
 
 pub fn run(brain: &Brain, force: bool) -> Result<()> {
     if brain.home.exists() {
@@ -67,67 +68,60 @@ pub fn run(brain: &Brain, force: bool) -> Result<()> {
 }
 
 fn bootstrap_qmd_collection(brain: &Brain) {
-    if which::which("qmd").is_err() {
+    if !qmd_available() {
         println!(
             "  i qmd not found. For semantic search, install with: npm install -g @tobilu/qmd"
         );
         return;
     }
-    let target = brain.home.canonicalize().unwrap_or_else(|_| brain.home.clone());
-    match qmd_collection_path(QMD_COLLECTION_NAME) {
-        Some(p) if p.canonicalize().unwrap_or(p.clone()) == target => {
-            println!(
-                "  ✓ qmd collection '{QMD_COLLECTION_NAME}' already registered to {}",
-                brain.home.display()
-            );
-            return;
+    register_collection(&brain.home, BRAIN_COLLECTION);
+    let mut registered_sources = 0;
+    for name in mounted_source_names(&brain.sources_dir()) {
+        let dest = brain.sources_dir().join(&name);
+        let target = match std::fs::read_link(&dest) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if !target.exists() {
+            eprintln!("  ! source '{name}' is broken; skipping qmd registration");
+            continue;
         }
-        Some(p) => {
-            eprintln!(
-                "  ! qmd collection '{QMD_COLLECTION_NAME}' is registered to {} — pointing it at {} would conflict.",
-                p.display(),
-                brain.home.display()
-            );
-            eprintln!(
-                "    Run `qmd collection remove {QMD_COLLECTION_NAME}` first if you want this brain to own that name."
-            );
-            return;
+        if register_collection(&target, &name) {
+            registered_sources += 1;
         }
-        None => {}
     }
-    let status = Command::new("qmd")
-        .args(["collection", "add"])
-        .arg(&brain.home)
-        .args(["--name", QMD_COLLECTION_NAME])
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            println!(
-                "  ✓ Registered qmd collection '{QMD_COLLECTION_NAME}' over {}",
-                brain.home.display()
-            );
-            eprintln!(
-                "  i Run `qmd embed` once to generate vector embeddings (~30s + model download)."
-            );
-        }
-        Ok(s) => eprintln!("  ! qmd collection add exited with {s} — register manually if needed"),
-        Err(e) => eprintln!("  ! qmd collection add failed: {e}"),
+    if registered_sources > 0 {
+        eprintln!(
+            "  i Run `qmd embed` once to generate vector embeddings for {registered_sources} new source(s)."
+        );
     }
 }
 
-fn qmd_collection_path(name: &str) -> Option<std::path::PathBuf> {
-    let output = Command::new("qmd")
-        .args(["collection", "show", name])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if let Some(rest) = line.trim().strip_prefix("Path:") {
-            return Some(std::path::PathBuf::from(rest.trim()));
+/// Register one collection. Returns true on Created (new index work pending).
+fn register_collection(target: &Path, name: &str) -> bool {
+    match qmd_collection::register(target, name) {
+        Ok(RegisterOutcome::Created) => {
+            println!("  ✓ Registered qmd collection '{name}' over {}", target.display());
+            true
+        }
+        Ok(RegisterOutcome::AlreadyMatches) => {
+            println!("  ✓ qmd collection '{name}' already registered");
+            false
+        }
+        Ok(RegisterOutcome::Conflict { existing }) => {
+            eprintln!(
+                "  ! qmd collection '{name}' is registered to {} — pointing it at {} would conflict.",
+                existing.display(),
+                target.display()
+            );
+            eprintln!(
+                "    Run `qmd collection remove {name}` first to let this brain own that name."
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("  ! qmd collection add for '{name}' failed: {e}");
+            false
         }
     }
-    None
 }
