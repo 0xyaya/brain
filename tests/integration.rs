@@ -148,7 +148,7 @@ fn source_remove_unlinks_only_the_symlink() {
     run_ok(&home, &["source", "add", "ext", target.to_str().unwrap()]);
     run_ok(&home, &["source", "remove", "ext"]);
 
-    assert!(!home.join("sources").join("ext").symlink_metadata().is_ok());
+    assert!(home.join("sources").join("ext").symlink_metadata().is_err());
     // Target itself must NOT be deleted by `source remove`.
     assert!(target.is_dir(), "remove must not touch the target");
     assert!(target.join("file.md").exists(), "target contents must survive remove");
