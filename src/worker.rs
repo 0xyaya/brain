@@ -25,14 +25,22 @@ pub async fn drain_one_pass(brain_home: &Path) -> Result<DrainOutcome> {
     }
     let attempting_at = marker;
 
-    let update = Command::new("qmd").arg("update").output().await?;
+    let update = Command::new("qmd")
+        .arg("update")
+        .kill_on_drop(true)
+        .output()
+        .await?;
     if !update.status.success() {
         return Ok(DrainOutcome::Failed {
             stderr: String::from_utf8_lossy(&update.stderr).into_owned(),
         });
     }
 
-    let embed = Command::new("qmd").arg("embed").output().await?;
+    let embed = Command::new("qmd")
+        .arg("embed")
+        .kill_on_drop(true)
+        .output()
+        .await?;
     if !embed.status.success() {
         return Ok(DrainOutcome::Failed {
             stderr: String::from_utf8_lossy(&embed.stderr).into_owned(),

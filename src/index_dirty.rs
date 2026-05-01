@@ -92,3 +92,32 @@ pub fn is_dirty(brain_home: &Path) -> Result<bool> {
     let watermark = read_last_indexed(brain_home)?.unwrap_or(SystemTime::UNIX_EPOCH);
     Ok(marker > watermark)
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LagStatus {
+    UpToDate,
+    Ok(u64),
+    Warn(u64),
+    Bad(u64),
+}
+
+pub fn classify_lag(marker: Option<SystemTime>, last_indexed: Option<SystemTime>) -> LagStatus {
+    let Some(marker) = marker else {
+        return LagStatus::UpToDate;
+    };
+    let watermark = last_indexed.unwrap_or(SystemTime::UNIX_EPOCH);
+    if watermark >= marker {
+        return LagStatus::UpToDate;
+    }
+    let secs = marker
+        .duration_since(watermark)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if secs <= 60 {
+        LagStatus::Ok(secs)
+    } else if secs <= 300 {
+        LagStatus::Warn(secs)
+    } else {
+        LagStatus::Bad(secs)
+    }
+}

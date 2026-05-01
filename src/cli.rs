@@ -44,6 +44,17 @@ enum Command {
     /// Run brain as an MCP server over stdio.
     /// Wire this into your Claude Code MCP config to expose brain to agents.
     Serve,
+    /// Index management commands.
+    Index {
+        #[command(subcommand)]
+        action: IndexAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum IndexAction {
+    /// Force-drain the index queue once. Refuses if `brain serve` is running.
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -83,6 +94,9 @@ impl Cli {
                 SourceAction::Remove { name } => commands::source::remove(&brain, &name),
             },
             Command::Serve => commands::serve::run(brain),
+            Command::Index { action } => match action {
+                IndexAction::Sync => commands::index::sync(&brain),
+            },
         }
     }
 }

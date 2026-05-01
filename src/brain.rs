@@ -1,9 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-/// PARA buckets that brain_remember (v0.3) may write to. archive/ is human-curated.
-#[allow(dead_code)]
-pub const PARA_WRITABLE: &[&str] = &["projects", "areas", "resources"];
 pub const TOP_LEVEL_DIRS: &[&str] = &["projects", "areas", "resources", "archive", "sources"];
 
 pub struct Brain {

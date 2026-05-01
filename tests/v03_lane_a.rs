@@ -1,13 +1,7 @@
-// Lane A tests — dirty-bit + worker. The modules live in a binary crate, so
-// integration tests pull them in via `#[path]` rather than `use brainmd::...`.
+// Lane A tests — dirty-bit + worker.
 
-#[allow(dead_code)]
-#[path = "../src/index_dirty.rs"]
-mod index_dirty;
-
-#[allow(dead_code)]
-#[path = "../src/worker.rs"]
-mod worker;
+use brainmd::index_dirty;
+use brainmd::worker;
 
 use std::fs;
 use std::thread::sleep;

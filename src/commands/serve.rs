@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use rmcp::{
@@ -10,9 +11,13 @@ use rmcp::{
     tool, tool_handler, tool_router,
     transport::stdio,
 };
+use tokio_util::sync::CancellationToken;
 
-use crate::brain::{Brain, PARA_WRITABLE};
+use crate::brain::Brain;
+use brainmd::remember::{RememberInput, remember_inner};
 use brainmd::search_backend::{SearchOptions, parse_mode, pick_backend};
+use brainmd::serve_lock::ServeLock;
+use brainmd::worker::{DrainOutcome, drain_one_pass, spawn_worker};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct BrainContextArgs {
@@ -191,64 +196,23 @@ impl BrainServer {
         &self,
         Parameters(args): Parameters<BrainRememberArgs>,
     ) -> Result<CallToolResult, McpError> {
-        if !PARA_WRITABLE.contains(&args.category.as_str()) {
-            return Err(McpError::invalid_params(
-                format!(
-                    "category must be one of {PARA_WRITABLE:?}, got \"{}\"",
-                    args.category
-                ),
-                None,
-            ));
-        }
-        let project = args.project.as_deref().unwrap_or("inbox");
-        if project.contains('/') || project.contains("..") || project.is_empty() {
-            return Err(McpError::invalid_params(
-                format!("project name must be non-empty and not contain '/' or '..': {project}"),
-                None,
-            ));
-        }
-        let target = self
-            .brain
-            .home
-            .join(&args.category)
-            .join(format!("{project}.md"));
+        let input = RememberInput {
+            category: &args.category,
+            content: &args.content,
+            project: args.project.as_deref(),
+        };
+        let response = remember_inner(&self.brain.home, &input)?;
+        Ok(CallToolResult::success(vec![Content::text(response.to_string())]))
+    }
 
-        let created = !target.exists();
-
-        let now = time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_else(|_| "unknown-time".to_string());
-
-        let block = format!(
-            "\n---\nwritten: {now}\nby: mcp-client\n---\n{}\n",
-            args.content.trim_end()
-        );
-
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                McpError::internal_error(format!("creating {}: {}", parent.display(), e), None)
-            })?;
-        }
-
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&target)
-            .map_err(|e| {
-                McpError::internal_error(format!("opening {}: {}", target.display(), e), None)
-            })?;
-        let bytes_written = block.len();
-        file.write_all(block.as_bytes()).map_err(|e| {
-            McpError::internal_error(format!("writing {}: {}", target.display(), e), None)
+    #[tool(
+        description = "Force-drain the index queue once, synchronously. Returns JSON: {outcome: \"nothing_to_do\" | \"drained\" | \"failed\", attempted_at?: <rfc3339>, error?: string}. Useful when an agent wants a fresh search immediately after a write."
+    )]
+    async fn brain_sync(&self) -> Result<CallToolResult, McpError> {
+        let outcome = drain_one_pass(&self.brain.home).await.map_err(|e| {
+            McpError::internal_error(format!("drain_one_pass: {e:#}"), None)
         })?;
-
-        let response = serde_json::json!({
-            "path": target.to_string_lossy(),
-            "bytes_written": bytes_written,
-            "created": created,
-        });
-
+        let response = drain_outcome_to_json(&outcome);
         Ok(CallToolResult::success(vec![Content::text(response.to_string())]))
     }
 
@@ -374,6 +338,26 @@ impl ServerHandler for BrainServer {
     }
 }
 
+pub fn drain_outcome_to_json(outcome: &DrainOutcome) -> serde_json::Value {
+    match outcome {
+        DrainOutcome::NothingToDo => serde_json::json!({ "outcome": "nothing_to_do" }),
+        DrainOutcome::Drained { attempted_at } => {
+            let dt: time::OffsetDateTime = (*attempted_at).into();
+            let formatted = dt
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| "unknown-time".to_string());
+            serde_json::json!({
+                "outcome": "drained",
+                "attempted_at": formatted,
+            })
+        }
+        DrainOutcome::Failed { stderr } => serde_json::json!({
+            "outcome": "failed",
+            "error": stderr,
+        }),
+    }
+}
+
 pub fn run(brain: Brain) -> Result<()> {
     if !brain.home.is_dir() {
         anyhow::bail!(
@@ -381,6 +365,11 @@ pub fn run(brain: Brain) -> Result<()> {
             brain.home.display()
         );
     }
+
+    let lock = match ServeLock::try_acquire(&brain.home)? {
+        Some(l) => l,
+        None => anyhow::bail!("another brain serve already owns this brain — exiting"),
+    };
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -395,8 +384,20 @@ pub fn run(brain: Brain) -> Result<()> {
 
         tracing::info!("brain serve starting at {}", brain.home.display());
 
+        let cancel = CancellationToken::new();
+        let worker_handle = spawn_worker(brain.home.clone(), 5, cancel.clone()).await;
+
         let service = BrainServer::new(brain).serve(stdio()).await?;
-        service.waiting().await?;
+        let waiting = service.waiting().await;
+
+        cancel.cancel();
+        if let Err(e) = tokio::time::timeout(Duration::from_secs(5), worker_handle).await {
+            tracing::warn!("worker shutdown timed out: {e}");
+        }
+
+        waiting?;
         Ok::<(), anyhow::Error>(())
-    })
+    })?;
+    drop(lock);
+    Ok(())
 }
