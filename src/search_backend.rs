@@ -79,6 +79,17 @@ struct QmdRawHit {
 /// Translate `qmd://<collection>/<path>` to a brain-relative path.
 /// If the URI doesn't match the expected shape or the collection isn't `brain`,
 /// return the raw value unchanged so the agent still sees something useful.
+/// `qmd query --json` writes status lines (e.g. `Expanding query...`) to stdout
+/// before the JSON array. Returns the trimmed JSON slice, or None if no array starts.
+pub fn extract_qmd_json_array(stdout: &str) -> Option<&str> {
+    let start = if stdout.trim_start().starts_with('[') {
+        stdout.find('[')?
+    } else {
+        stdout.find("\n[").map(|i| i + 1)?
+    };
+    Some(stdout[start..].trim())
+}
+
 pub fn qmd_uri_to_path(uri: &str) -> String {
     let Some(rest) = uri.strip_prefix("qmd://") else {
         return uri.to_string();
@@ -123,13 +134,15 @@ impl SearchBackend for QmdBackend {
         }
 
         let stdout = std::str::from_utf8(&output.stdout)
-            .context("qmd stdout was not valid utf-8")?
-            .trim();
-        if stdout.is_empty() {
+            .context("qmd stdout was not valid utf-8")?;
+        if stdout.trim().is_empty() {
             return Ok(Vec::new());
         }
 
-        let raw: Vec<QmdRawHit> = serde_json::from_str(stdout)
+        let json_slice = extract_qmd_json_array(stdout)
+            .ok_or_else(|| anyhow!("qmd {subcommand} stdout had no JSON array"))?;
+
+        let raw: Vec<QmdRawHit> = serde_json::from_str(json_slice)
             .with_context(|| format!("failed to parse qmd {subcommand} JSON output"))?;
 
         let mut hits: Vec<SearchHit> = raw

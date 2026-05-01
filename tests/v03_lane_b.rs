@@ -3,8 +3,8 @@ use std::fs;
 use tempfile::TempDir;
 
 use brainmd::search_backend::{
-    RipgrepBackend, SearchBackend, SearchMode, SearchOptions, parse_mode, pick_backend,
-    qmd_uri_to_path,
+    RipgrepBackend, SearchBackend, SearchMode, SearchOptions, extract_qmd_json_array, parse_mode,
+    pick_backend, qmd_uri_to_path,
 };
 
 fn opts<'a>(query: &'a str, scope: Option<&'a str>, top_n: usize) -> SearchOptions<'a> {
@@ -36,6 +36,19 @@ fn qmd_uri_to_path_translation() {
         qmd_uri_to_path("/abs/path/to/foo.md"),
         "/abs/path/to/foo.md"
     );
+}
+
+#[test]
+fn extract_qmd_json_array_strips_progress_prefix() {
+    let with_prefix = "Expanding query... (0ms)\n├─ second brain\nReranking 2 chunks... (0ms)\n[\n  {\"file\":\"qmd://brain/foo.md\"}\n]\n";
+    let extracted = extract_qmd_json_array(with_prefix).unwrap();
+    assert!(extracted.starts_with('['));
+    serde_json::from_str::<serde_json::Value>(extracted).unwrap();
+
+    let bare = "[{\"file\":\"qmd://brain/x.md\"}]";
+    assert_eq!(extract_qmd_json_array(bare).unwrap(), bare);
+
+    assert_eq!(extract_qmd_json_array("no json here\n"), None);
 }
 
 #[test]

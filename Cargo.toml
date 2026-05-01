@@ -1,6 +1,6 @@
 [package]
 name = "brainmd"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "MCP-served aggregator of AI artifacts. PARA-structured second brain that mounts Claude Code, gstack, and other AI-tool memory via symlink sources."
 license = "MIT"
