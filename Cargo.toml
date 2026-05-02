@@ -1,6 +1,6 @@
 [package]
 name = "brainmd"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "MCP-served aggregator of AI artifacts. PARA-structured second brain that mounts Claude Code, gstack, and other AI-tool memory via symlink sources."
 license = "MIT"
@@ -27,7 +27,7 @@ urlencoding = "2.1"
 
 # MCP server (brain serve, v0.2)
 rmcp = { version = "1.5", features = ["server", "macros", "transport-io"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "time", "process"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "time", "process", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 filetime = "0.2"
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +39,8 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 async-trait = "0.1"
 which = "6"
 fs2 = "0.4"
+notify = "6"
+notify-debouncer-mini = "0.4"
 
 [dev-dependencies]
 tempfile = "3.10"

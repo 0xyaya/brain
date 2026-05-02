@@ -17,6 +17,7 @@ use crate::brain::Brain;
 use brainmd::remember::{RememberInput, remember_inner};
 use brainmd::search_backend::{SearchOptions, parse_mode, pick_backend};
 use brainmd::serve_lock::ServeLock;
+use brainmd::watcher::spawn_watcher;
 use brainmd::worker::{DrainOutcome, drain_one_pass, spawn_worker};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -386,6 +387,13 @@ pub fn run(brain: Brain) -> Result<()> {
 
         let cancel = CancellationToken::new();
         let worker_handle = spawn_worker(brain.home.clone(), 5, cancel.clone()).await;
+        let watcher_handle = match spawn_watcher(brain.home.clone(), cancel.clone()).await {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::warn!("file-watcher failed to start: {e:#}; continuing without it");
+                None
+            }
+        };
 
         let service = BrainServer::new(brain).serve(stdio()).await?;
         let waiting = service.waiting().await;
@@ -394,6 +402,10 @@ pub fn run(brain: Brain) -> Result<()> {
         if let Err(e) = tokio::time::timeout(Duration::from_secs(5), worker_handle).await {
             tracing::warn!("worker shutdown timed out: {e}");
         }
+        if let Some(handle) = watcher_handle
+            && let Err(e) = tokio::time::timeout(Duration::from_secs(5), handle).await {
+                tracing::warn!("watcher shutdown timed out: {e}");
+            }
 
         waiting?;
         Ok::<(), anyhow::Error>(())

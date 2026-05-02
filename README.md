@@ -76,7 +76,9 @@ $ brain_search "dirty bit worker"        # via MCP
 }
 ```
 
-`brain serve` runs a background worker that drains within `BRAIN_INDEX_INTERVAL` seconds (default 5) of every `brain_remember` write — `qmd update` refreshes the BM25 index, `qmd embed` adds vectors for new chunks. Both are content-hash idempotent, so unchanged content costs nothing. Freshness lag is reported by `brain doctor`.
+`brain serve` runs a background worker that drains within `BRAIN_INDEX_INTERVAL` seconds (default 5). The worker fires on agent writes (dirty bit set by `brain_remember`) and on filesystem events under the brain home + every mounted source target — `qmd update` refreshes the BM25 index, `qmd embed` adds vectors for new chunks. Both are content-hash idempotent, so unchanged content costs nothing. Freshness lag is reported by `brain doctor`.
+
+Direct file edits (vim, `git pull`) are picked up automatically via the file-watcher.
 
 `brain index sync` force-drains from the CLI when `brain serve` isn't running. `brain_sync()` is the in-session equivalent over MCP — useful when an agent writes and immediately needs the result searchable.
 
@@ -101,8 +103,9 @@ Brain is yours. Agents are guests. They read what you mount and save notes for y
 - **`qmd not found` from `brain doctor`** — run `npm install -g @tobilu/qmd` and `brain init --force` to re-register the collections.
 - **`another brain serve already owns this brain — exiting`** — only one `brain serve` per brain home (advisory file lock at `.brain/serve.lock`). Stop the other instance or restart your MCP client.
 - **`qmd collection 'X' is registered to <other-path>`** — qmd's collection registry is global per user. Either remove the conflicting registration (`qmd collection remove X`) or use a different name. Common when two brains share a name like `brain`.
-- **Stale search results after manual edits** (Vim, `git pull`, `rm`) — `brain` only fires the dirty marker on `brain_remember` writes. Re-index manually with `brain index sync` for now; v0.4 will add a file-watcher.
+- **Stale search results after manual edits** (Vim, `git pull`, `rm`) — picked up automatically by the file-watcher in v0.3.1+. If `brain serve` isn't running, force a refresh with `brain index sync`. The watcher snapshots the source list at startup, so newly mounted sources require restarting `brain serve` (planned for v0.4).
+- **Linux: `inotify watch limit reached`** — the file-watcher uses inotify under the hood. Raise the limit by adding `fs.inotify.max_user_watches=524288` to `/etc/sysctl.d/99-inotify.conf` and reloading (`sudo sysctl --system`). The watcher logs a clear warning and continues even when watches fail to install, so search keeps working via `brain_remember` writes.
 
 ## Status
 
-v0.3.0. Unix only (macOS, Linux). MIT.
+v0.3.1 — adds a file-watcher that closes the freshness gap for external edits (vim, `git pull`). Unix only (macOS, Linux). MIT.
