@@ -7,11 +7,18 @@ PARA-structured markdown at `~/brain/`, plus symlinks to whatever external memor
 ## Install
 
 ```sh
-cargo install brainmd
-brain init
+npm install -g @tobilu/qmd       # search backend (semantic + BM25 + reranking)
+cargo install brainmd            # crate is `brainmd`, binary is `brain`
+brain init                       # scaffolds ~/brain/, auto-mounts AI-tool memory,
+                                 # registers each mount as a qmd collection
+qmd embed                        # one-time, ~30s + 333MB model download
 ```
 
-The crate is `brainmd`. The binary is `brain`. `brain init` scaffolds `~/brain/` and auto-mounts the AI-tool memory it finds on your system.
+`brain init` is interactive-friendly: it auto-mounts known AI-tool memory paths it finds on your system (Claude Code, gstack, etc.) and registers each as its own qmd collection so search hits the symlink targets.
+
+`$BRAIN_HOME` overrides the default `~/brain/` location. Useful if you keep separate work and personal brains.
+
+Without qmd installed, `brain_search` falls back to `rg` keyword search — semantic queries return nothing useful, but everything else still works.
 
 ## Wire it into Claude Code
 
@@ -25,10 +32,11 @@ Append to `~/.claude/CLAUDE.md` so every session knows brain exists:
 ## brain
 Personal second brain over MCP. Call `brain_context` first when the
 user asks anything that depends on cross-session context. Use
-`brain_remember` to save notes for them.
+`brain_search` to find prior decisions, notes, or anything across
+mounted sources. Use `brain_remember` to save notes for the user.
 ```
 
-Open a new Claude Code session and ask *"what's in my brain?"*
+Open a new Claude Code session and ask *"what's in my brain?"* or *"what did I decide about X?"*
 
 ## Folder
 
@@ -54,14 +62,23 @@ The four buckets follow Tiago Forte's [PARA](https://fortelabs.com/blog/para/) n
 
 ## Search
 
-`brain_search` ranks across your whole brain — PARA buckets and every mounted source. Two backends, picked at request time:
+`brain_search` ranks across your whole brain — PARA buckets and every mounted source. `brain init` and `brain source add` register a separate qmd collection per mount (over the symlink target), so search hits the real files. Brain-relative paths come back in results:
 
-- **qmd (recommended)** — semantic + BM25 + reranking. Install with `npm install -g @tobilu/qmd`, then `brain init` registers the collection automatically. First run needs one `qmd embed` to generate vectors (~30s + a 333MB model download). After that, `brain serve` runs a background worker that re-runs `qmd update && qmd embed` every ~5s when `brain_remember` writes happen. Freshness lag is reported by `brain doctor`.
-- **ripgrep fallback** — keyword-only. No setup; degrades all modes silently to `fast`. Used automatically when `qmd` is not on PATH.
+```
+$ brain_search "dirty bit worker"        # via MCP
+{
+  "backend": "qmd",
+  "mode": "hybrid",
+  "hits": [
+    { "score": 0.93, "path": "sources/gstack-projects/brain/yann-main-design-…md", "snippet": "…" },
+    { "score": 0.50, "path": "sources/claude-memory/sessionmoney-api-deployment.md", "snippet": "…" }
+  ]
+}
+```
 
-`BRAIN_INDEX_INTERVAL` (default `5`, range `1..=60`) overrides the worker cadence. `brain index sync` force-drains from the CLI when `brain serve` isn't running.
+`brain serve` runs a background worker that drains within `BRAIN_INDEX_INTERVAL` seconds (default 5) of every `brain_remember` write — `qmd update` refreshes the BM25 index, `qmd embed` adds vectors for new chunks. Both are content-hash idempotent, so unchanged content costs nothing. Freshness lag is reported by `brain doctor`.
 
-> **v0.3 limitation:** the `brain` qmd collection does not follow symlinks, so files under `sources/*` (mounted external memory) are not searchable yet. To search a mounted source today, register it as its own qmd collection: `qmd collection add ~/.gstack/projects --name gstack-projects`. v0.3.1 will automate this in `brain source add`.
+`brain index sync` force-drains from the CLI when `brain serve` isn't running. `brain_sync()` is the in-session equivalent over MCP — useful when an agent writes and immediately needs the result searchable.
 
 ## CLI
 
@@ -79,6 +96,13 @@ brain index sync        # force-drain the index queue once (refuses if `brain se
 
 Brain is yours. Agents are guests. They read what you mount and save notes for you via `brain_remember` — but their own identity, beliefs, and daily journal live in their own tool's store, never in brain.
 
+## Troubleshooting
+
+- **`qmd not found` from `brain doctor`** — run `npm install -g @tobilu/qmd` and `brain init --force` to re-register the collections.
+- **`another brain serve already owns this brain — exiting`** — only one `brain serve` per brain home (advisory file lock at `.brain/serve.lock`). Stop the other instance or restart your MCP client.
+- **`qmd collection 'X' is registered to <other-path>`** — qmd's collection registry is global per user. Either remove the conflicting registration (`qmd collection remove X`) or use a different name. Common when two brains share a name like `brain`.
+- **Stale search results after manual edits** (Vim, `git pull`, `rm`) — `brain` only fires the dirty marker on `brain_remember` writes. Re-index manually with `brain index sync` for now; v0.4 will add a file-watcher.
+
 ## Status
 
-v0.3. Unix only (macOS, Linux). MIT.
+v0.3.0. Unix only (macOS, Linux). MIT.
