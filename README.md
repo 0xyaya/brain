@@ -1,6 +1,6 @@
 # parabrain
 
-> A second brain for your AI agents — yours, not theirs.
+> Your second brain — open to your AI agents.
 
 PARA-structured markdown at `~/brain/`, plus symlinks to whatever external memory you want surfaced (Claude Code, gstack, Obsidian, anything). Exposed over MCP so every agent on your machine reads and writes to the same place.
 
