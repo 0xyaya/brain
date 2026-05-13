@@ -45,6 +45,81 @@ fn brain_remember_touches_dirty_marker() {
 }
 
 #[test]
+fn brain_remember_autosync_pushes_to_hub() {
+    // End-to-end: a brain wired up to a hub via the real `brain` CLI, then
+    // a remember_inner call. The MCP write hook should spawn `brain sync`,
+    // which commits the deposit and pushes it to the bare.
+    let tmp = fresh_brain();
+    let home = tmp.path();
+
+    // Use the real brain CLI to bring the brain to a hub-attached state.
+    let run = |args: &[&str]| -> std::process::Output {
+        Command::new(BRAIN_BIN)
+            .env("BRAIN_HOME", home)
+            .args(args)
+            .output()
+            .expect("brain CLI")
+    };
+    let out = run(&["init"]);
+    assert!(out.status.success(), "init failed: {:?}", out);
+
+    // Set a deterministic git identity so commits don't depend on global config.
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(home)
+            .args(args)
+            .output()
+            .expect("git")
+    };
+    let _ = git(&["config", "user.email", "test@brain.local"]);
+    let _ = git(&["config", "user.name", "brain test"]);
+
+    // First sync makes the initial commit so `hub init` can seed the bare.
+    let out = run(&["sync"]);
+    assert!(out.status.success(), "sync failed: {:?}", out);
+    let out = run(&["hub", "init"]);
+    assert!(out.status.success(), "hub init failed: {:?}", out);
+
+    // Now write via the MCP path. Autosync should fire.
+    let input = RememberInput {
+        category: "projects",
+        content: "remember-then-push",
+        project: Some("hub-test"),
+    };
+    let _ = remember_inner(home, &input).expect("remember ok");
+
+    // Wait for the detached `brain sync` child to commit + push.
+    let bare = {
+        let mut s = home.as_os_str().to_owned();
+        s.push(".git");
+        std::path::PathBuf::from(s)
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut pushed = false;
+    while std::time::Instant::now() < deadline {
+        let log = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare)
+            .args(["log", "--oneline", "main"])
+            .output()
+            .expect("git log");
+        if log.status.success() {
+            let s = String::from_utf8_lossy(&log.stdout);
+            if s.contains("autosync") && fs::metadata(home.join("projects/hub-test.md")).is_ok() {
+                pushed = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        pushed,
+        "brain_remember should have triggered a brain sync that pushed to the bare within 10s"
+    );
+}
+
+#[test]
 fn serve_lock_blocks_second_acquisition() {
     let tmp = fresh_brain();
     let home = tmp.path();

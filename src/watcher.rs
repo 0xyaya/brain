@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -7,7 +8,8 @@ use notify_debouncer_mini::{DebounceEventResult, new_debouncer};
 use tokio_util::sync::CancellationToken;
 
 use crate::index_dirty;
-use crate::qmd_collection::mounted_source_names;
+use crate::source_config::SourceConfig;
+use crate::source_mirror;
 use crate::worker::{DrainOutcome, drain_one_pass};
 
 const DEBOUNCE_MS: u64 = 200;
@@ -54,42 +56,52 @@ pub fn is_relevant(path: &Path) -> bool {
     true
 }
 
-fn collect_watch_targets(brain_home: &Path) -> (Vec<PathBuf>, usize) {
+/// Returns (paths to watch, source origin → name map).
+/// The origin→name map lets event handlers figure out which source a
+/// changed file belongs to so it can mirror that source incrementally.
+fn collect_watch_targets(brain_home: &Path) -> (Vec<PathBuf>, HashMap<PathBuf, String>) {
     let mut targets = Vec::new();
+    let mut origin_to_name: HashMap<PathBuf, String> = HashMap::new();
+
     for bucket in PARA_BUCKETS {
         let p = brain_home.join(bucket);
         if p.is_dir() {
             targets.push(p);
         }
     }
-    let sources_dir = brain_home.join("sources");
-    let mut source_count = 0;
-    for name in mounted_source_names(&sources_dir) {
-        let symlink = sources_dir.join(&name);
-        match std::fs::read_link(&symlink) {
-            Ok(target) => {
-                let absolute = if target.is_absolute() {
-                    target
-                } else {
-                    sources_dir.join(target)
-                };
-                if absolute.exists() {
-                    targets.push(absolute);
-                    source_count += 1;
-                } else {
-                    tracing::warn!(
-                        "watcher: skipping broken source symlink '{}' -> {}",
-                        name,
-                        absolute.display()
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!("watcher: read_link failed for '{}': {}", name, e);
-            }
+
+    let cfg = SourceConfig::load(brain_home).unwrap_or_default();
+    for (name, entry) in &cfg.sources {
+        if !entry.from.exists() {
+            tracing::warn!(
+                "watcher: skipping source '{name}' — origin {} missing on this host",
+                entry.from.display()
+            );
+            continue;
+        }
+        // Canonicalize so prefix matches still work even when the config
+        // stores a path that resolves through a symlink (e.g. /var → /private/var
+        // on macOS). Fall back to the configured path if canonicalize fails.
+        let canonical = entry.from.canonicalize().unwrap_or_else(|_| entry.from.clone());
+        targets.push(canonical.clone());
+        origin_to_name.insert(canonical, name.clone());
+    }
+
+    (targets, origin_to_name)
+}
+
+/// Match an event path against registered origin paths. Returns the source
+/// name if the event happened under exactly one origin.
+fn source_name_for_event(
+    event_path: &Path,
+    origin_to_name: &HashMap<PathBuf, String>,
+) -> Option<String> {
+    for (origin, name) in origin_to_name {
+        if event_path.starts_with(origin) {
+            return Some(name.clone());
         }
     }
-    (targets, source_count)
+    None
 }
 
 pub async fn spawn_watcher(
@@ -115,11 +127,30 @@ pub async fn spawn_watcher(
         }
     }
 
-    let (targets, source_count) = collect_watch_targets(&brain_home);
+    let (targets, origin_to_name) = collect_watch_targets(&brain_home);
     tracing::info!(
         "watcher snapshot: {} sources; restart brain serve to pick up new sources",
-        source_count
+        origin_to_name.len()
     );
+
+    // Catch-up mirror for any source that drifted while serve was down.
+    if let Ok(cfg) = SourceConfig::load(&brain_home) {
+        for (name, entry) in &cfg.sources {
+            if !entry.from.exists() {
+                continue;
+            }
+            let dest = brain_home.join("sources").join(name);
+            match source_mirror::mirror(&entry.from, &dest) {
+                Ok(report) => tracing::info!(
+                    "watcher: initial mirror of '{name}' — copied={} deleted={} unchanged={}",
+                    report.copied,
+                    report.deleted,
+                    report.unchanged
+                ),
+                Err(e) => tracing::warn!("watcher: initial mirror of '{name}' failed: {e}"),
+            }
+        }
+    }
 
     // Tokio bridge: a std mpsc from the debouncer thread, forwarded into a tokio mpsc
     // so we can `tokio::select!` against cancellation.
@@ -173,7 +204,47 @@ pub async fn spawn_watcher(
                     };
                     match evt {
                         Ok(events) => {
-                            if events.iter().any(|e| is_relevant(&e.path))
+                            // Bucket events: which originate inside source
+                            // origins (-> mirror), and which are in-brain
+                            // (-> touch dirty marker)?
+                            let mut sources_to_resync: std::collections::HashSet<String> = std::collections::HashSet::new();
+                            let mut any_brain_relevant = false;
+                            for e in &events {
+                                // Only react to markdown changes. Editor temp
+                                // files (.swp, ~), hidden files, and non-md
+                                // content don't move the index forward.
+                                if !is_relevant(&e.path) {
+                                    continue;
+                                }
+                                if let Some(name) = source_name_for_event(&e.path, &origin_to_name) {
+                                    sources_to_resync.insert(name);
+                                } else {
+                                    any_brain_relevant = true;
+                                }
+                            }
+                            // Re-mirror each affected source. The mirror
+                            // writes inside the brain, which itself dirties
+                            // the index.
+                            let cfg = SourceConfig::load(&brain_home).unwrap_or_default();
+                            for name in &sources_to_resync {
+                                let Some(entry) = cfg.sources.get(name) else { continue };
+                                let dest = brain_home.join("sources").join(name);
+                                match source_mirror::mirror(&entry.from, &dest) {
+                                    Ok(report) if report.copied + report.deleted > 0 => {
+                                        any_brain_relevant = true;
+                                        tracing::info!(
+                                            "watcher: re-mirrored '{name}' — copied={} deleted={}",
+                                            report.copied,
+                                            report.deleted
+                                        );
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => tracing::warn!(
+                                        "watcher: mirror of '{name}' failed: {e}"
+                                    ),
+                                }
+                            }
+                            if any_brain_relevant
                                 && let Err(err) = index_dirty::touch(&brain_home) {
                                     tracing::warn!("watcher: failed to touch dirty marker: {err:#}");
                                 }

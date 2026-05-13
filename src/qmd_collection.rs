@@ -65,21 +65,12 @@ pub fn unregister(name: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// List the source names mounted under <brain>/sources/, for query scoping.
-pub fn mounted_source_names(sources_dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(sources_dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .symlink_metadata()
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false)
-        })
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
+/// List the source names registered for this brain, for query scoping.
+/// Sources are tracked in `<brain_home>/.brain/sources.json` — see
+/// [`crate::source_config`].
+pub fn mounted_source_names(brain_home: &Path) -> Vec<String> {
+    let cfg = crate::source_config::SourceConfig::load(brain_home).unwrap_or_default();
+    let mut names: Vec<String> = cfg.sources.keys().cloned().collect();
     names.sort();
     names
 }

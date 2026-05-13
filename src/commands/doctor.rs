@@ -1,6 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use brainmd::index_dirty::{self, LagStatus};
 use brainmd::qmd_collection::{self, BRAIN_COLLECTION};
+use brainmd::source_config::SourceConfig;
 
 use crate::brain::{Brain, TOP_LEVEL_DIRS};
 
@@ -24,30 +25,59 @@ pub fn run(brain: &Brain) -> Result<()> {
         }
     }
 
-    let sources = brain.sources_dir();
-    if sources.is_dir() {
-        let entries = std::fs::read_dir(&sources)
-            .with_context(|| format!("reading {}", sources.display()))?;
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
+    let cfg = SourceConfig::load(&brain.home).unwrap_or_default();
+    let sources_dir = brain.sources_dir();
+    for (name, entry) in &cfg.sources {
+        let dest = sources_dir.join(name);
+        let origin_ok = entry.from.exists();
+        let mirror_ok = dest.is_dir();
+        match (origin_ok, mirror_ok) {
+            (true, true) => println!("  ✓ source {name} <- {}", entry.from.display()),
+            (false, true) => {
+                println!(
+                    "  ! source {name}: origin {} missing on this host (mirror dir still readable)",
+                    entry.from.display()
+                );
+            }
+            (true, false) => {
+                println!(
+                    "  ! source {name}: mirror dir absent (run: brain source sync {name})"
+                );
+                issues += 1;
+            }
+            (false, false) => {
+                println!(
+                    "  ✗ source {name}: origin {} missing AND no mirror dir. Remove: brain source remove {name}",
+                    entry.from.display()
+                );
+                issues += 1;
+            }
+        }
+    }
+
+    // Flag pre-mirror legacy entries under sources/ (e.g. symlinks from
+    // the old design) that aren't in the config. They're orphaned.
+    if sources_dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(&sources_dir)
+    {
+        for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let meta = path.symlink_metadata()?;
+            if cfg.sources.contains_key(&name) {
+                continue;
+            }
+            let path = entry.path();
+            let meta = match path.symlink_metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
             if meta.file_type().is_symlink() {
-                let target = std::fs::read_link(&path)?;
-                if path.exists() {
-                    println!("  ✓ source {} -> {}", name, target.display());
-                } else {
-                    println!(
-                        "  ✗ source {} broken (target {} missing). Fix: brain source remove {}",
-                        name,
-                        target.display(),
-                        name
-                    );
-                    issues += 1;
-                }
+                println!(
+                    "  ! sources/{name} is a legacy symlink. Remove with: rm {} (then re-add via `brain source add {name} --from <path>`)",
+                    path.display()
+                );
+                issues += 1;
             } else {
-                println!("  ! {} is not a symlink (sources/ should hold symlinks only)", name);
+                println!("  ! sources/{name} is unregistered (not in sources.json)");
                 issues += 1;
             }
         }
@@ -120,29 +150,24 @@ fn check_qmd_collections(brain: &Brain) -> u32 {
             issues += 1;
         }
     }
-    for name in qmd_collection::mounted_source_names(&brain.sources_dir()) {
+    for name in qmd_collection::mounted_source_names(&brain.home) {
         let dest = brain.sources_dir().join(&name);
-        let target = match std::fs::read_link(&dest) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let target_canonical = target.canonicalize().unwrap_or_else(|_| target.clone());
+        let dest_canonical = dest.canonicalize().unwrap_or_else(|_| dest.clone());
         match qmd_collection::collection_path(&name) {
-            Some(p) if p.canonicalize().unwrap_or(p.clone()) == target_canonical => {
-                println!("  ✓ qmd collection '{name}' → {}", target.display());
+            Some(p) if p.canonicalize().unwrap_or(p.clone()) == dest_canonical => {
+                println!("  ✓ qmd collection '{name}' → {}", dest.display());
             }
             Some(p) => {
                 println!(
-                    "  ! qmd collection '{name}' is registered to {} (source target is {})",
+                    "  ! qmd collection '{name}' is registered to {} (brain mirror is at {})",
                     p.display(),
-                    target.display()
+                    dest.display()
                 );
                 issues += 1;
             }
             None => {
                 println!(
-                    "  ! qmd collection '{name}' not registered. Fix: brain source add {name} {} --force",
-                    target.display()
+                    "  ! qmd collection '{name}' not registered. Fix: brain source sync {name}"
                 );
                 issues += 1;
             }

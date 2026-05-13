@@ -3,45 +3,53 @@ use std::path::Path;
 
 use crate::brain::Brain;
 use brainmd::qmd_collection::{self, RegisterOutcome, qmd_available};
+use brainmd::source_config::{SourceConfig, SourceEntry};
+use brainmd::source_mirror;
 
-pub fn add(brain: &Brain, name: &str, target: &Path, force: bool) -> Result<()> {
+pub fn add(brain: &Brain, name: &str, from: &Path, force: bool) -> Result<()> {
     validate_name(name)?;
 
-    let sources = brain.sources_dir();
-    if !sources.is_dir() {
+    let sources_dir = brain.sources_dir();
+    if !sources_dir.is_dir() {
+        return Err(anyhow!("{} does not exist. Run: brain init", sources_dir.display()));
+    }
+
+    let from_canonical = from
+        .canonicalize()
+        .with_context(|| format!("resolving {}", from.display()))?;
+    if !from_canonical.is_dir() {
+        return Err(anyhow!("origin {} must be a directory", from_canonical.display()));
+    }
+
+    let mut cfg = SourceConfig::load(&brain.home)?;
+    if cfg.sources.contains_key(name) && !force {
         return Err(anyhow!(
-            "{} does not exist. Run: brain init",
-            sources.display()
+            "source '{name}' is already registered (from {}). Use --force to re-register.",
+            cfg.sources[name].from.display()
         ));
     }
+    cfg.sources.insert(
+        name.to_string(),
+        SourceEntry { from: from_canonical.clone() },
+    );
+    cfg.save(&brain.home)?;
 
-    let canonical_target = target
-        .canonicalize()
-        .with_context(|| format!("resolving target path {}", target.display()))?;
-
-    let dest = sources.join(name);
-    if dest.symlink_metadata().is_ok() {
-        if force {
-            std::fs::remove_file(&dest)
-                .with_context(|| format!("removing existing source at {}", dest.display()))?;
-        } else {
-            return Err(anyhow!(
-                "source {} already exists at {}. Use --force to overwrite.",
-                name,
-                dest.display()
-            ));
-        }
-    }
-
-    std::os::unix::fs::symlink(&canonical_target, &dest).with_context(|| {
-        format!("symlink {} -> {}", dest.display(), canonical_target.display())
-    })?;
-    println!("Mounted {} -> {}", name, canonical_target.display());
+    let dest = sources_dir.join(name);
+    let report = source_mirror::mirror(&from_canonical, &dest)
+        .with_context(|| format!("initial mirror for source '{name}'"))?;
+    println!(
+        "Mounted {name} <- {}\n  Initial mirror: {} copied, {} unchanged",
+        from_canonical.display(),
+        report.copied,
+        report.unchanged
+    );
 
     if qmd_available() {
-        match qmd_collection::register(&canonical_target, name) {
+        // qmd indexes the mirror dir under the brain, not the origin: that's
+        // what `brain_read("sources/<name>/...")` and search must agree on.
+        match qmd_collection::register(&dest, name) {
             Ok(RegisterOutcome::Created) => {
-                println!("  ✓ Registered qmd collection '{name}' over {}", canonical_target.display());
+                println!("  ✓ Registered qmd collection '{name}' over {}", dest.display());
                 println!("  i Run `qmd embed` to generate vector embeddings for the new source.");
             }
             Ok(RegisterOutcome::AlreadyMatches) => {
@@ -51,7 +59,7 @@ pub fn add(brain: &Brain, name: &str, target: &Path, force: bool) -> Result<()> 
                 eprintln!(
                     "  ! qmd collection '{name}' is registered to {} — pointing it at {} would conflict.",
                     existing.display(),
-                    canonical_target.display()
+                    dest.display()
                 );
                 eprintln!("    Run `qmd collection remove {name}` first to let this brain own that name.");
             }
@@ -62,63 +70,39 @@ pub fn add(brain: &Brain, name: &str, target: &Path, force: bool) -> Result<()> 
 }
 
 pub fn list(brain: &Brain) -> Result<()> {
-    let sources = brain.sources_dir();
-    if !sources.is_dir() {
-        return Err(anyhow!(
-            "{} does not exist. Run: brain init",
-            sources.display()
-        ));
-    }
-
-    let mut entries: Vec<_> = std::fs::read_dir(&sources)?
-        .collect::<std::io::Result<_>>()
-        .with_context(|| format!("reading {}", sources.display()))?;
-    entries.sort_by_key(|e| e.file_name());
-
-    if entries.is_empty() {
+    let cfg = SourceConfig::load(&brain.home)?;
+    if cfg.sources.is_empty() {
         println!("No sources mounted.");
         return Ok(());
     }
-
-    for entry in entries {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let meta = match path.symlink_metadata() {
-            Ok(m) => m,
-            Err(e) => {
-                println!("{:30} ! {}", name, e);
-                continue;
-            }
-        };
-        if meta.file_type().is_symlink() {
-            match std::fs::read_link(&path) {
-                Ok(target) => {
-                    let marker = if path.exists() { "" } else { " [broken]" };
-                    println!("{:30} -> {}{}", name, target.display(), marker);
-                }
-                Err(e) => println!("{:30} ! {}", name, e),
-            }
-        } else {
-            println!("{:30} (not a symlink)", name);
-        }
+    for (name, entry) in &cfg.sources {
+        let origin_status = if entry.from.exists() { "ok" } else { "MISSING" };
+        let dest = brain.sources_dir().join(name);
+        let dest_marker = if dest.is_dir() { "" } else { " (mirror not initialized)" };
+        println!(
+            "{name:30} <- {} [{origin_status}]{dest_marker}",
+            entry.from.display()
+        );
     }
     Ok(())
 }
 
 pub fn remove(brain: &Brain, name: &str) -> Result<()> {
     validate_name(name)?;
-    let dest = brain.sources_dir().join(name);
-    let meta = dest
-        .symlink_metadata()
-        .with_context(|| format!("source {} not found at {}", name, dest.display()))?;
-    if !meta.file_type().is_symlink() {
+    let mut cfg = SourceConfig::load(&brain.home)?;
+    if cfg.sources.remove(name).is_none() {
         return Err(anyhow!(
-            "{} is not a symlink; refusing to remove (sources/ should hold symlinks only)",
-            dest.display()
+            "source '{name}' is not registered. Run `brain source list` to see what's mounted."
         ));
     }
-    std::fs::remove_file(&dest).with_context(|| format!("removing {}", dest.display()))?;
-    println!("Unmounted {}", name);
+    cfg.save(&brain.home)?;
+
+    let dest = brain.sources_dir().join(name);
+    if dest.is_dir() {
+        std::fs::remove_dir_all(&dest)
+            .with_context(|| format!("removing mirror dir {}", dest.display()))?;
+    }
+    println!("Unmounted {name}");
 
     if qmd_available() {
         match qmd_collection::unregister(name) {
@@ -130,12 +114,47 @@ pub fn remove(brain: &Brain, name: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn sync(brain: &Brain, only: Option<&str>) -> Result<()> {
+    let cfg = SourceConfig::load(&brain.home)?;
+    if cfg.sources.is_empty() {
+        println!("No sources mounted.");
+        return Ok(());
+    }
+    let names: Vec<String> = match only {
+        Some(n) => {
+            if !cfg.sources.contains_key(n) {
+                return Err(anyhow!("source '{n}' is not registered."));
+            }
+            vec![n.to_string()]
+        }
+        None => cfg.sources.keys().cloned().collect(),
+    };
+    for name in names {
+        let entry = &cfg.sources[&name];
+        let dest = brain.sources_dir().join(&name);
+        if !entry.from.exists() {
+            eprintln!(
+                "  ! {name}: origin {} missing on this host; skipping.",
+                entry.from.display()
+            );
+            continue;
+        }
+        let report = source_mirror::mirror(&entry.from, &dest)
+            .with_context(|| format!("mirroring source '{name}'"))?;
+        println!(
+            "  {name}: {} copied, {} deleted, {} unchanged",
+            report.copied, report.deleted, report.unchanged
+        );
+    }
+    Ok(())
+}
+
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(anyhow!("source name must not be empty"));
     }
     if name.contains('/') || name.contains("..") {
-        return Err(anyhow!("source name must not contain '/' or '..': {}", name));
+        return Err(anyhow!("source name must not contain '/' or '..': {name}"));
     }
     Ok(())
 }

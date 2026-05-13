@@ -1,6 +1,9 @@
 pub mod doctor;
+pub mod hub;
 pub mod index;
 pub mod init;
+pub mod join;
 pub mod serve;
 pub mod snapshot;
 pub mod source;
+pub mod sync;

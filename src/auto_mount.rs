@@ -1,8 +1,22 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub struct AutoMount {
     pub name: &'static str,
     pub target: PathBuf,
+}
+
+/// Short hostname for namespacing source dirs. Falls back to `"unknown"`
+/// if the `hostname` binary isn't on PATH.
+pub fn hostname_short() -> String {
+    Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 impl AutoMount {

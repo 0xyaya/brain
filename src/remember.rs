@@ -2,6 +2,7 @@ use std::path::Path;
 
 use rmcp::ErrorData as McpError;
 
+use crate::autosync;
 use crate::index_dirty;
 
 pub const PARA_WRITABLE: &[&str] = &["projects", "areas", "resources"];
@@ -69,6 +70,11 @@ pub fn remember_inner(
     if let Err(e) = index_dirty::touch(brain_home) {
         tracing::warn!("brain_remember succeeded but dirty-touch failed: {e:#}");
     }
+
+    // Fire-and-forget: push this deposit to the hub within seconds (rather
+    // than waiting for the timer's next tick). No-ops on single-machine
+    // brains or when BRAIN_DISABLE_AUTOSYNC=1.
+    autosync::try_autosync(brain_home);
 
     Ok(serde_json::json!({
         "path": target.to_string_lossy(),

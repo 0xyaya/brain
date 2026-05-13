@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use brainmd::index_dirty;
+use brainmd::source_config::{SourceConfig, SourceEntry};
 use brainmd::watcher::{is_relevant, spawn_watcher};
 
 use tempfile::TempDir;
@@ -32,16 +33,20 @@ fn fresh_brain_with_source() -> (TempDir, PathBuf, PathBuf) {
         fs::create_dir_all(home.join(d)).unwrap();
     }
     fs::create_dir_all(home.join(".brain")).unwrap();
+    fs::create_dir_all(home.join("sources")).unwrap();
 
-    // Mount a source via symlink to a sibling target dir.
-    let target = tmp.path().join("src-target");
-    fs::create_dir_all(&target).unwrap();
-    let sources_dir = home.join("sources");
-    fs::create_dir_all(&sources_dir).unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, sources_dir.join("scratch")).unwrap();
+    // Register a source via the config so the watcher discovers its origin.
+    let origin = tmp.path().join("src-origin");
+    fs::create_dir_all(&origin).unwrap();
+    let mut cfg = SourceConfig::default();
+    cfg.sources.insert(
+        "scratch".to_string(),
+        SourceEntry { from: origin.clone() },
+    );
+    cfg.save(&home).unwrap();
+    fs::create_dir_all(home.join("sources/scratch")).unwrap();
 
-    (tmp, home, target)
+    (tmp, home, origin)
 }
 
 async fn wait_for_marker(home: &Path, timeout: Duration) -> Option<SystemTime> {
@@ -72,6 +77,14 @@ async fn watcher_touches_marker_on_md_write() {
     // 200ms debounce + macOS fsevent delay; allow up to 3s.
     let mtime = wait_for_marker(&home, Duration::from_secs(3)).await;
     assert!(mtime.is_some(), "dirty marker should exist after .md write");
+
+    // Mirror should have propagated the origin write into sources/scratch/.
+    let mirrored = home.join("sources/scratch/note.md");
+    assert!(
+        mirrored.exists(),
+        "watcher should mirror origin writes into sources/<name>/"
+    );
+    assert_eq!(fs::read(&mirrored).unwrap(), b"hello");
 
     cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;

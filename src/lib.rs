@@ -1,7 +1,10 @@
+pub mod autosync;
 pub mod index_dirty;
 pub mod qmd_collection;
 pub mod remember;
 pub mod search_backend;
 pub mod serve_lock;
+pub mod source_config;
+pub mod source_mirror;
 pub mod watcher;
 pub mod worker;
