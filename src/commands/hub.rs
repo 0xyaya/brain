@@ -89,13 +89,20 @@ fn install_post_receive_hook(bare: &Path, work_tree: &Path) -> Result<()> {
     fs::create_dir_all(&hooks_dir)
         .with_context(|| format!("creating {}", hooks_dir.display()))?;
     let hook_path = hooks_dir.join("post-receive");
+    // Use the working copy's own git (with `unset GIT_DIR`) so its local
+    // main ref + HEAD stay aligned with the bare. A simple `git checkout
+    // -f main --git-dir=<bare>` only updates files, leaving the working
+    // copy's history stuck at whatever it was before — confusing for
+    // `git log` and breaks any subsequent `brain sync` from the hub host.
     let script = format!(
         "#!/bin/sh\n\
          # Installed by `brain hub init`. Keeps the hub's working copy in\n\
          # sync with whatever is pushed to the bare repo.\n\
          set -e\n\
-         GIT_DIR={bare} GIT_WORK_TREE={work} git checkout -f main\n",
-        bare = shell_quote(bare),
+         cd {work}\n\
+         unset GIT_DIR\n\
+         git fetch origin\n\
+         git reset --hard origin/main\n",
         work = shell_quote(work_tree),
     );
     fs::write(&hook_path, script)
